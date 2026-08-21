@@ -41,8 +41,11 @@ class JsonGraph(gym.spaces.Box):
 
         self.converter = converter
         self.planner = planner
-        self._shape = (1,)
-        self.dtype = np.dtype("U100000")
+        try:
+            self.shape = (1,)
+        except AttributeError:
+            self._shape = (1,)
+        self.dtype = np.dtype("U250000")  # bumped from U100000: vilg convention on "city" scenario measured 118,556 chars, exceeding the old limit
         self.node_dimension = node_dimension
         self.edge_dimension = edge_dimension
         
