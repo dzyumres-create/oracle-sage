@@ -93,15 +93,19 @@ def env_to_vilg_graph(env):
     to a shared 9-dim vector, since object nodes and proposition nodes use disjoint feature
     blocks but must share one feature vector length.
 
-    Goal status (achieved/unachieved) is not yet distinguished here -- every proposition is
-    tagged achieved_propositional_nongoal, since Taxi has no static goal set wired in yet
-    (see implementation plan Step 4).
+    destination(pid, loc) is the only propositional goal in Taxi: it's tagged
+    unachieved_propositional_goal while pid is still in env.passengers, and flips to
+    achieved_propositional_goal once delivered -- see implementation plan Step 4 (this
+    relies on attempt_dropoff keeping the passenger node/destination edge alive under the
+    "vilg" graph_convention instead of removing it). All other propositions (adjacent, in)
+    are tagged achieved_propositional_nongoal, since Taxi has no other goal predicates.
 
     :param env: taxi world state in env format
     :return: node_feats, edge_feats, edge_index, mask, global_feats
     """
     node_feats = []
     node_kind = []  # parallel list: True = object node, False = proposition node
+    selectable = []  # parallel list: True if this node may ever be a legal action target
     edges = []  # list of (src_idx, dst_idx, position_label)
 
     # --- object nodes: identical source data/order to env_to_graph ---
@@ -111,6 +115,11 @@ def env_to_vilg_graph(env):
         obj_index[nid] = i
         node_feats.append(data['attr'] + [0, 0, 0, 0, 0, 0])
         node_kind.append(True)
+        # A delivered passenger's node can persist in the graph (Step 4) purely to carry
+        # goal status -- it must never be selectable again once popped from
+        # env.passengers, since attempt_pickup would KeyError on self.passengers[pid].
+        is_passenger = data['attr'] == [0, 0, 1]
+        selectable.append((not is_passenger) or (nid in env.passengers))
 
     # --- proposition nodes: one per forward-direction edge in env.graph ---
     next_idx = len(sorted_object_nodes)
@@ -119,9 +128,13 @@ def env_to_vilg_graph(env):
             continue  # skip reverse-direction duplicate added for Oracle-SAGE message passing
 
         pred_onehot = attr['attr'][:-1]
-        status_onehot = [0, 0, 1]  # [achieved_goal, unachieved_goal, achieved_nongoal]
+        if pred_onehot == [0, 0, 1]:  # destination(pid, loc) -- u is the passenger
+            status_onehot = [0, 1, 0] if u in env.passengers else [1, 0, 0]
+        else:
+            status_onehot = [0, 0, 1]  # achieved_propositional_nongoal
         node_feats.append([0, 0, 0] + pred_onehot + status_onehot)
         node_kind.append(False)
+        selectable.append(False)
 
         edges.append((next_idx, obj_index[u], 1))
         edges.append((next_idx, obj_index[v], 2))
@@ -129,12 +142,14 @@ def env_to_vilg_graph(env):
 
     node_feats = np.array(node_feats, dtype=np.float64)
     node_kind = np.array(node_kind, dtype=bool)
+    selectable = np.array(selectable, dtype=bool)
     edge_index = np.array([[s, d] for (s, d, _) in edges]).T
     # edge label (argument position) replaces predicate-identity edge attr from Oracle-SAGE's convention
     edge_feats = np.array([[1, 0] if pos == 1 else [0, 1] for (_, _, pos) in edges], dtype=np.float64)
 
-    # only object nodes are selectable actions -- proposition nodes are always masked out
-    mask = node_kind.copy()
+    # only currently-live object nodes are selectable actions -- proposition nodes and
+    # delivered-but-persisting passenger nodes are always masked out, in both branches below
+    mask = node_kind & selectable
     if env.planning == False:
         restricted = np.zeros(len(node_feats), dtype=bool)
         restricted[obj_index[env.taxi.location]] = True

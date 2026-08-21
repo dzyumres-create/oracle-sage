@@ -135,8 +135,16 @@ class TaxiWorldSimulator(object):
             self.taxi = Taxi(self.taxi.node, self.taxi.location, None)
             self.delivery_limit -= 1
             # print(f"seed-id: {self.seed_id}. Time: {self.time} Delivered passenger.")
-            self.graph.remove_node(pid)
-            self.resort_passengers()
+            if self.graph_convention == "vilg":
+                # Keep the passenger node and its destination(pid, dest) edges so the
+                # vILG graph can mark the goal achieved rather than making it vanish --
+                # implementation plan Step 4, option 1. Only the pid<->taxi "in" edges
+                # added back in attempt_pickup are now stale.
+                self.graph.remove_edge(pid, 0)
+                self.graph.remove_edge(0, pid)
+            else:
+                self.graph.remove_node(pid)
+                self.resort_passengers()
             return self.rewards["drop-off"]
         else:
             self.passengers[pid]=passenger
