@@ -46,31 +46,106 @@ def nextwork_to_graph(network,mapping):
 
 
 def env_to_graph(env):
-    node_feats = np.array([v['attr'] for _,v in sorted(env.graph.nodes.items())],dtype=np.float)
+    node_feats = np.array([v['attr'] for _,v in sorted(env.graph.nodes.items())],dtype=np.float64)
     edges = nx.to_edgelist(env.graph)
-    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=np.float)
+    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=np.float64)
     edge_index = np.array([[x,y] for (x,y,_) in edges]).T
-    
+
     #mask need to be different for SAGE vs SR-DRL. In SAGE, it's probably fine to let mask be true everywhere.
     #In SR-DRL, should only be: the taxis current position and any adjacent positions, any passengers in the taxi's location, and the taxi.
-    #Conveniently, this is equal to the taxis location, and all nodes which are adjacent to it. 
+    #Conveniently, this is equal to the taxis location, and all nodes which are adjacent to it.
     #Need to be a bit careful with this because this is masking a number of actions which can be taken in normal taxi: pickup when no passenger present, dropoff when no passenger in taxi, and move into walls.
     if env.planning == False:
-        mask = np.zeros(len(node_feats),dtype=np.bool)
+        mask = np.zeros(len(node_feats),dtype=bool)
         mask[env.taxi.location]=True
         for x in env.graph[env.taxi.location]:
             mask[x]=True
     else:
-        mask = np.ones(len(node_feats),dtype=np.bool)
+        mask = np.ones(len(node_feats),dtype=bool)
 
 
-    global_feats = np.zeros(EMB_SIZE,dtype=np.float)
+    global_feats = np.zeros(EMB_SIZE,dtype=np.float64)
     time_left = (env.timeout-env.time)/env.timeout
     global_feats[0] = time_left
 
     return node_feats, edge_feats, edge_index, mask, global_feats
 
 
+def env_to_vilg_json(env):
+    """
+    Converts taxi world state from env to json representation, using the vILG
+    (predicate-instance) graph convention instead of Oracle-SAGE's object-only convention.
+
+    :param env: taxi world state in env format
+    :return: taxi world state in json format
+    """
+    return graph_to_json(*env_to_vilg_graph(env))
+
+
+def env_to_vilg_graph(env):
+    """
+    Converts taxi world state from env to a vILG graph (Chen & Thiebaux, Def 3.1): every
+    grounded proposition currently true in the state gets its own node, connected by
+    position-labeled edges to the object nodes that are its arguments, in addition to the
+    object nodes themselves.
+
+    Node features pad the object one-hot (3) and the predicate/status one-hots (3 + 3) out
+    to a shared 9-dim vector, since object nodes and proposition nodes use disjoint feature
+    blocks but must share one feature vector length.
+
+    Goal status (achieved/unachieved) is not yet distinguished here -- every proposition is
+    tagged achieved_propositional_nongoal, since Taxi has no static goal set wired in yet
+    (see implementation plan Step 4).
+
+    :param env: taxi world state in env format
+    :return: node_feats, edge_feats, edge_index, mask, global_feats
+    """
+    node_feats = []
+    node_kind = []  # parallel list: True = object node, False = proposition node
+    edges = []  # list of (src_idx, dst_idx, position_label)
+
+    # --- object nodes: identical source data/order to env_to_graph ---
+    sorted_object_nodes = sorted(env.graph.nodes.items())
+    obj_index = {}
+    for i, (nid, data) in enumerate(sorted_object_nodes):
+        obj_index[nid] = i
+        node_feats.append(data['attr'] + [0, 0, 0, 0, 0, 0])
+        node_kind.append(True)
+
+    # --- proposition nodes: one per forward-direction edge in env.graph ---
+    next_idx = len(sorted_object_nodes)
+    for (u, v, attr) in env.graph.edges(data=True):
+        if attr['attr'][-1] != 1:
+            continue  # skip reverse-direction duplicate added for Oracle-SAGE message passing
+
+        pred_onehot = attr['attr'][:-1]
+        status_onehot = [0, 0, 1]  # [achieved_goal, unachieved_goal, achieved_nongoal]
+        node_feats.append([0, 0, 0] + pred_onehot + status_onehot)
+        node_kind.append(False)
+
+        edges.append((next_idx, obj_index[u], 1))
+        edges.append((next_idx, obj_index[v], 2))
+        next_idx += 1
+
+    node_feats = np.array(node_feats, dtype=np.float64)
+    node_kind = np.array(node_kind, dtype=bool)
+    edge_index = np.array([[s, d] for (s, d, _) in edges]).T
+    # edge label (argument position) replaces predicate-identity edge attr from Oracle-SAGE's convention
+    edge_feats = np.array([[1, 0] if pos == 1 else [0, 1] for (_, _, pos) in edges], dtype=np.float64)
+
+    # only object nodes are selectable actions -- proposition nodes are always masked out
+    mask = node_kind.copy()
+    if env.planning == False:
+        restricted = np.zeros(len(node_feats), dtype=bool)
+        restricted[obj_index[env.taxi.location]] = True
+        for x in env.graph[env.taxi.location]:
+            restricted[obj_index[x]] = True
+        mask = mask & restricted
+
+    global_feats = np.zeros(EMB_SIZE, dtype=np.float64)
+    global_feats[0] = (env.timeout - env.time) / env.timeout
+
+    return node_feats, edge_feats, edge_index, mask, global_feats
 
 
 
