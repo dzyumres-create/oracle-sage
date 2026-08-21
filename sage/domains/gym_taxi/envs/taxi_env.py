@@ -93,6 +93,13 @@ CONVERTERS = {
     # "one-hot": json_to_one_hot,
 }
 
+# (node_dimension, edge_dimension) per graph-construction convention -- see
+# docs/vILG_taxi_translator_spec.md for what each convention encodes.
+GRAPH_CONVENTIONS = {
+    "oracle_sage": (3, 4),
+    "vilg": (9, 2),
+}
+
 
 DIRECTIONS = {
     (0, -1): "move-up",
@@ -530,21 +537,33 @@ class JsonTaxiEnv(BaseTaxiEnv):
 
 
 class GraphTaxiEnv(BaseTaxiEnv):
-    def __init__(self, representation, scenario, mask=False, rewards=None):
+    def __init__(self, representation, scenario, mask=False, rewards=None, graph_convention="oracle_sage"):
+        if graph_convention not in GRAPH_CONVENTIONS:
+            raise ValueError(
+                f"invalid graph_convention {graph_convention!r}; expected one of {sorted(GRAPH_CONVENTIONS)}"
+            )
         self.rewards = rewards
         self.scenario = SCENARIOS[scenario]
         self.mask=mask
+        self.graph_convention = graph_convention
         super().__init__()
         #image = _construct_image(representation, scenario)
+        node_dimension, edge_dimension = GRAPH_CONVENTIONS[graph_convention]
         self.observation_space = JsonGraph(
-            converter=json_to_graph,node_dimension=3,edge_dimension=4, planner=Planner()
+            converter=json_to_graph,node_dimension=node_dimension,edge_dimension=edge_dimension, planner=Planner()
         )
         self.first = True
         if scenario == "original":
             self.action_space = spaces.Discrete(ORIGINAL_ACTION_COUNT)
 
     def _init_simulator(self):
-        return TaxiWorldSimulator(self.np_random, **self.scenario, rewards=self.rewards, planning= not self.mask)
+        return TaxiWorldSimulator(
+            self.np_random,
+            **self.scenario,
+            rewards=self.rewards,
+            planning= not self.mask,
+            graph_convention=self.graph_convention,
+        )
 
     def step(self, action):
         obs, reward, done, info = self._step(action)

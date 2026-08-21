@@ -10,7 +10,7 @@ import networkx as nx
 
 from typing import List, NamedTuple
 
-from sage.domains.gym_taxi.utils.representations import env_to_image, env_to_json
+from sage.domains.gym_taxi.utils.representations import env_to_image, env_to_json, env_to_vilg_json
 from sage.domains.gym_taxi.utils.config import MAX_EPISODE_LENGTH
 from sage.domains.gym_taxi.utils.utils import generate_random_walls, generate_city_maze
 
@@ -62,7 +62,8 @@ class TaxiWorldSimulator(object):
         random_walls=True,
         taxi_locations=None,
         rewards=None,
-        planning = False
+        planning = False,
+        graph_convention = "oracle_sage"
     ):
         """
         Houses the game state and transition dynamics for the taxi world.
@@ -84,6 +85,7 @@ class TaxiWorldSimulator(object):
         self.rewards = rewards if rewards is not None else DEFAULT_REWARDS
         self.done = False
         self.planning = planning
+        self.graph_convention = graph_convention
 
         self.graph = self.generate_road_network(random_walls)
 
@@ -91,9 +93,11 @@ class TaxiWorldSimulator(object):
 
         self.passengers = {}
         self.add_passenger()
-        
+
 
     def _get_state_json(self):
+        if self.graph_convention == "vilg":
+            return env_to_vilg_json(self)
         return env_to_json(self)
 
     def act(self, action):

@@ -41,7 +41,7 @@ class JsonGraph(gym.spaces.Box):
 
         self.converter = converter
         self.planner = planner
-        self.shape = (1,)
+        self._shape = (1,)
         self.dtype = np.dtype("U100000")
         self.node_dimension = node_dimension
         self.edge_dimension = edge_dimension
