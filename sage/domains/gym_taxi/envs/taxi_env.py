@@ -550,7 +550,7 @@ class GraphTaxiEnv(BaseTaxiEnv):
         #image = _construct_image(representation, scenario)
         node_dimension, edge_dimension = GRAPH_CONVENTIONS[graph_convention]
         self.observation_space = JsonGraph(
-            converter=json_to_graph,node_dimension=node_dimension,edge_dimension=edge_dimension, planner=Planner()
+            converter=json_to_graph,node_dimension=node_dimension,edge_dimension=edge_dimension, planner=Planner(graph_convention=self.graph_convention)
         )
         self.first = True
         if scenario == "original":
