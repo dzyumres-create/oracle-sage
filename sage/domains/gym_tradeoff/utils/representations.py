@@ -30,7 +30,7 @@ def env_to_json(env):
     return graph_to_json(*env_to_graph(env))
     
 def env_to_graph(env):
-    grid = np.arange(2,env.n*env.k+2,dtype=np.int).reshape(env.k,env.n)
+    grid = np.arange(2,env.n*env.k+2,dtype=int).reshape(env.k,env.n)
     shift = np.roll(grid.copy(),1,-1)
     shift[:,0]=1 # starting room
     edge_index = np.stack((shift.flatten(),grid.flatten()))
@@ -45,10 +45,10 @@ def env_to_graph(env):
     rooms = np.stack((np.ones(env.n*env.k),np.zeros(env.n*env.k),env.gains.flatten(),env.costs.flatten())).T
     node_feats = np.concatenate((player,start,rooms),axis=0)
     
-    mask = np.zeros((grid.shape),dtype=np.bool)
+    mask = np.zeros((grid.shape),dtype=bool)
     mask[:,-1]=True
-    mask = np.concatenate((np.zeros(2,dtype=np.bool),mask.flatten()),axis=0)
+    mask = np.concatenate((np.zeros(2,dtype=bool),mask.flatten()),axis=0)
 
-    global_feats = np.zeros(EMB_SIZE,dtype=np.float)
+    global_feats = np.zeros(EMB_SIZE,dtype=float)
 
     return node_feats, edge_feats, edge_index, mask, global_feats
