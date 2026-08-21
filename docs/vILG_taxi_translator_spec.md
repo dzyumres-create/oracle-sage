@@ -168,7 +168,9 @@ purely so the GNN's message passing can route predicate/goal information into th
 embeddings. When you implement action selection, filter the candidate node list to
 `nodes[n]["kind"] == "object"` before the autoregressive goal-selection step.
 
-## 9. A side effect worth flagging in your report
+## 9. Side effects worth flagging in your report
+
+### 9.1 Effective message-passing depth shrinks
 
 Under Oracle-SAGE's convention, two objects related by a binary predicate (e.g. taxi and its
 current location via `in`) are **1 hop apart** — connected directly by an edge. Under νILG,
@@ -182,6 +184,34 @@ this as a confound when comparing Cell 1 vs Cell 2 results, or (b) compensate by
 extra message-passing layer for the νILG condition and justify that choice. Worth raising with
 Andrew before you lock in the experiment design — it affects whether Cell 1 vs Cell 2 is a clean
 comparison of "graph convention" alone, or convention entangled with effective depth.
+
+### 9.2 Persistent goal nodes grow the graph in aggregate, not monotonically per step
+
+Once Step 4 is implemented (destination(pid, loc) persists and flips to
+`achieved_propositional_goal` instead of the passenger node being deleted on delivery), the
+original expectation was that Cell 2's node count would **strictly grow** across an episode,
+never shrinking the way Cell 1's does. Having actually implemented and hand-verified this
+(`docs/test_vilg_delivery.py`), the corrected picture is more precise than that:
+
+- The goal node itself — `destination(pid, loc)` — never disappears once created. It persists
+  at a stable identity and correctly flips `unachieved_propositional_goal` →
+  `achieved_propositional_goal` on delivery. That part of the "doesn't shrink" intuition holds.
+- But total node count **is not monotonic at the per-step level**. At the exact delivery
+  transition, `attempt_dropoff` removes the now-stale `in(pid, taxi)` "carrying" edges (the
+  passenger genuinely is no longer in the taxi, and that atom isn't a goal, so νILG correctly
+  gives it no node). In the hand-traced example, this drops total node count by 1 at that one
+  step (38 → 37), even though the goal node it might look like "shrank" is untouched.
+- So the real invariant is: **goal-relevant nodes never shrink; non-goal, non-adjacent
+  propositions (like "currently carrying") can still appear and disappear as normal, and their
+  churn can transiently outweigh goal-node accumulation at any single step.** Over a full
+  episode with several deliveries, Cell 2's node count still trends upward in aggregate relative
+  to Cell 1 (which deletes the entire passenger subgraph, goal atom included, on every
+  delivery) — but "strictly growing, step over step" is not a guarantee you can rely on or
+  assert in analysis code.
+
+If your experiment design or analysis leaned on a per-step monotonic growth assumption (e.g. to
+sanity-check episode traces, or to reason about padding/batching by node count), swap it for the
+aggregate/goal-node-specific version above.
 
 ## 10. Open questions to confirm before/while coding
 
