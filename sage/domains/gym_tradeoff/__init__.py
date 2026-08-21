@@ -3,7 +3,7 @@ import gym
 import itertools
 
 def safe_register(id,entry_point,kwargs=None):
-    if id not in gym.envs.registration.registry.env_specs:
+    if id not in gym.envs.registration.registry:
         register(id,entry_point=entry_point,kwargs=kwargs)
 
 VALUES = [1,3,5,10,15,20,30,40,50]

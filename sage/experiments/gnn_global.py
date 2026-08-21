@@ -27,10 +27,18 @@ def run(variant):
 
     info_keywords = ("len100","len200")
 
+    # gnn_global.py is a shared entrypoint (Taxi/Tradeoff/NLE); only Taxi's GraphTaxiEnv
+    # accepts graph_convention, so only pass it through when it's been set away from the
+    # default -- an empty env_kwargs is a no-op for every other env, so this can't affect
+    # any run that isn't explicitly opting into "vilg".
+    env_kwargs = {}
+    if variant["graph_convention"] != "oracle_sage":
+        env_kwargs["graph_convention"] = variant["graph_convention"]
+
     if variant["planner"]:
-        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv)
+        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv,env_kwargs=env_kwargs)
     else:
-        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords})
+        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},env_kwargs=env_kwargs)
 
     if variant["feedback"]:
         if variant["planner"]:
@@ -47,6 +55,13 @@ def main(arglist):
     parser = argparse.ArgumentParser(description=None)
     parser.add_argument(
         "--env-name", default="Boxworld-v0", help="Select the environment to run"
+    )
+    parser.add_argument(
+        "--graph-convention",
+        type=str,
+        default="oracle_sage",
+        choices=["oracle_sage", "vilg"],
+        help="graph construction convention for Taxi's graph observations (default: oracle_sage)",
     )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
@@ -220,6 +235,7 @@ def main(arglist):
         algorithm="A2C",
         version="normal",
         env_name=args.env_name,
+        graph_convention=args.graph_convention,
         seed=args.seed,
         num_env_steps=args.num_env_steps,
         num_processes=args.num_processes,
