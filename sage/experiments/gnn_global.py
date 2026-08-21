@@ -2,6 +2,7 @@
 Run DQN on grid world.
 """
 import sys
+import os
 import argparse
 import torch as th
 
@@ -49,7 +50,8 @@ def run(variant):
         model = A2C(GNNPolicy, env, verbose=variant["verbose"],supported_action_spaces=(spaces.BinaryAction,gym.spaces.Discrete,spaces.Autoregressive),**variant["algorithm_kwargs"])
         
     model.learn(total_timesteps=variant["num_env_steps"],log_interval=variant['log_interval'], callback=TensorboardCallback(variant["verbose"]))
-    #model.save(variant["save_dir"])
+    os.makedirs(variant["save_dir"], exist_ok=True)
+    model.save(variant["save_dir"] + "/final_model")
 
 def main(arglist):
     parser = argparse.ArgumentParser(description=None)
