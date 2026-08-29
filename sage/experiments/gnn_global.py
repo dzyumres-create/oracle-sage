@@ -20,6 +20,7 @@ from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_
 from sage.agent.graph_policy import GNNPolicy
 from sage.agent.graph_feedback_policy import GNNFeedbackPolicy
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
+from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy
 from sage.agent.tb_logging import TensorboardCallback
 from sage.agent.async_vec_env import AsyncVecEnv
 
@@ -34,7 +35,9 @@ def run(variant):
 
     if variant["feedback"]:
         if variant["planner"]:
-            model = PlanFeedback_A2C(GNNPlanFeedbackPolicy, env, verbose=variant["verbose"],supported_action_spaces=(spaces.BinaryAction,gym.spaces.Discrete,spaces.Autoregressive),**variant["algorithm_kwargs"])
+            policy_kwargs = variant["algorithm_kwargs"].get("policy_kwargs", {})
+            planner_policy = WLPlanFeedbackPolicy if policy_kwargs.get("wl_vocab_path") is not None else GNNPlanFeedbackPolicy
+            model = PlanFeedback_A2C(planner_policy, env, verbose=variant["verbose"],supported_action_spaces=(spaces.BinaryAction,gym.spaces.Discrete,spaces.Autoregressive),**variant["algorithm_kwargs"])
         else:
             model = Feedback_A2C(GNNFeedbackPolicy, env, verbose=variant["verbose"],supported_action_spaces=(spaces.BinaryAction,gym.spaces.Discrete,spaces.Autoregressive),**variant["algorithm_kwargs"])
     else:
@@ -171,6 +174,12 @@ def main(arglist):
         "--shared-gnn", action="store_true", default=False, help="gnn for action selection and path value share parameters"
     )
     parser.add_argument(
+        "--wl-vocab-path", type=str, default=None,
+        help="path to a frozen WL-colour vocab JSON; when given, uses WLPlanFeedbackPolicy "
+             "(WL-embedding meta-controller) instead of GNNPlanFeedbackPolicy for the "
+             "planner+feedback (Taxi) branch",
+    )
+    parser.add_argument(
         "--layer-norm", action="store_true", default=False, help="perform layer normalisation on inputs to path value function"
     )
     parser.add_argument(
@@ -255,6 +264,8 @@ def main(arglist):
         # policy_kwargs=dict(
         # ),
     )
+    if args.wl_vocab_path is not None:
+        variant["algorithm_kwargs"]["policy_kwargs"]["wl_vocab_path"] = args.wl_vocab_path
     # optionally set the GPU (default=False)
     run(variant)
 

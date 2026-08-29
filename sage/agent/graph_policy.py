@@ -275,10 +275,18 @@ class GNNPolicy(BasePolicy):
         # Note: If net_arch is None and some features extractor is used,
         #       net_arch here is an empty list and mlp_extractor does not
         #       really contain any layers (acts like an identity module).
-  
+
         self.gnn_extractor = GNNExtractor(
             edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
         )
+
+    def _build_value_net(self) -> None:
+        """
+        Create the value network. Factored out of _build() so a subclass
+        (e.g. a non-GNN meta-controller encoder) can override just this,
+        before _build()'s optimizer construction captures self.parameters().
+        """
+        self.value_net = nn.Linear(EMB_SIZE, 1)
 
     def _build(self, lr_schedule: Schedule) -> None:
         """
@@ -332,7 +340,7 @@ class GNNPolicy(BasePolicy):
         else:
             raise NotImplementedError(f"Unsupported distribution '{self.action_dist}'.")
 
-        self.value_net = nn.Linear(EMB_SIZE, 1)
+        self._build_value_net()
         # Init weights: use orthogonal initialization
         # with small initial weight for the output
         if self.ortho_init:
