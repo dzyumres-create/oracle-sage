@@ -223,7 +223,11 @@ def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATI
     for _ in range(episodes):
         env.reset()
         for _ in range(steps_per_episode):
-            node_feats, edge_feats, edge_index_np, _, _ = env_to_graph(env.sim)
+            # env_to_graph now also returns wl_colours/wl_histogram (this
+            # script's own WL wiring is unrelated - it recomputes wl_colours
+            # itself, in growing mode, below - so those two extra values are
+            # discarded here).
+            node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_graph(env.sim)
             x = th.as_tensor(node_feats, dtype=th.float)
             edge_attr = th.as_tensor(edge_feats, dtype=th.float)
             edge_index = th.as_tensor(edge_index_np, dtype=th.long)

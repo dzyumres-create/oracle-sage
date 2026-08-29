@@ -16,8 +16,11 @@
 from math import floor, ceil
 import json
 import numpy as np
+import torch as th
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
+from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, NUM_ITERATIONS as WL_NUM_ITERATIONS
 from sage.domains.utils.representations import graph_to_json, EMB_SIZE
+from sage.domains.utils.wl_colours import wl_colours
 import networkx as nx
 import cv2
 
@@ -68,7 +71,18 @@ def env_to_graph(env):
     time_left = (env.timeout-env.time)/env.timeout
     global_feats[0] = time_left
 
-    return node_feats, edge_feats, edge_index, mask, global_feats
+    # WL colours (see sage/domains/gym_taxi/utils/wl_vocab_cache.py: fixed
+    # to a specific frozen, validated vocab - frozen=True means unseen
+    # signatures resolve to OOV rather than growing the vocab at runtime).
+    _x = th.as_tensor(node_feats, dtype=th.float)
+    _edge_index = th.as_tensor(edge_index, dtype=th.long)
+    _edge_attr = th.as_tensor(edge_feats, dtype=th.float)
+    wl_colour_ids, wl_histogram = wl_colours(
+        _x, _edge_index, _edge_attr,
+        num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
+    )
+
+    return node_feats, edge_feats, edge_index, mask, global_feats, wl_colour_ids.tolist(), wl_histogram.tolist()
 
 
 
