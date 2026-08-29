@@ -241,9 +241,14 @@ class GNNFeedbackPolicy(GNNPolicy):
         
         self.path_value_net = PathValueNet(layer_norm)
 
-        if self.shared_gnn:
+        if self.shared_gnn and isinstance(self.gnn_extractor, GNNExtractor):
             self.gnn_extractor2 = self.gnn_extractor
-        else:            
+        else:
+            # Non-GNN meta-controller encoders (e.g. WLEmbeddingExtractor)
+            # can't share weights with the discriminator's GNN pass - the
+            # discriminator always gets its own independent GNNExtractor
+            # here, regardless of shared_gnn, whenever self.gnn_extractor
+            # isn't itself a GNNExtractor.
             self.gnn_extractor2 = GNNExtractor(
                 edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
             )

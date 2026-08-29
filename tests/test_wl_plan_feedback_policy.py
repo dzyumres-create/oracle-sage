@@ -25,6 +25,7 @@ import sage.domains.utils.build_wl_vocab  # noqa: F401
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.representations import env_to_json
 from sage.agent.graph_policy import GNNExtractor
+from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy, WLEmbeddingExtractor
 
 
@@ -34,7 +35,7 @@ def make_city_env():
     return env
 
 
-def make_policy(env, shared_gnn):
+def make_policy(env, shared_gnn, policy_cls=WLPlanFeedbackPolicy):
     # features_extractor_kwargs must be an explicit dict (not the None
     # default): GNNPolicy.__init__ unconditionally calls .pop("gnn_steps",
     # 5) on it, which crashes on None - a pre-existing quirk, not
@@ -47,7 +48,7 @@ def make_policy(env, shared_gnn):
     # per-node scores over batch.x, not via this nominal space's
     # cardinality). Real Taxi training also runs with the default
     # --ortho-init=False (gnn_global.py), so this matches real usage.
-    return WLPlanFeedbackPolicy(
+    return policy_cls(
         env.observation_space, env.action_space, lambda _: 1e-3,
         features_extractor_kwargs={}, shared_gnn=shared_gnn, ortho_init=False,
     )
@@ -74,25 +75,38 @@ class TestWLPlanFeedbackPolicyConstruction(unittest.TestCase):
         # default wl_vocab_path points at the validated frozen vocab
         self.assertTrue(policy.wl_vocab_path.endswith("wl_vocab_taxi_city_L1.json"))
 
-    def test_shared_gnn_true_reproduces_the_known_deferred_aliasing_gap(self):
+    def test_shared_gnn_true_no_longer_aliases_a_non_gnn_meta_controller(self):
         """
-        Documents (does NOT fix) the known gap: GNNFeedbackPolicy.__init__
-        aliases gnn_extractor2 = gnn_extractor whenever shared_gnn=True, with
-        no type check (graph_feedback_policy.py:244-249). Since Taxi's real
-        training config passes --shared-gnn (shared_gnn=True), this means
-        the discriminator's encoder is CURRENTLY, CONCRETELY the same
-        WLEmbeddingExtractor object as the meta-controller's - not the
-        independent GNN discriminator the design requires. Fixing this is
-        an explicitly separate, not-yet-implemented task (item (a)); this
-        test exists to prove the gap is real and reproducible, not just a
-        documentation claim.
+        Confirms the fix to the previously-known gap: GNNFeedbackPolicy.__init__
+        (graph_feedback_policy.py:244-249) now only aliases
+        gnn_extractor2 = gnn_extractor when self.gnn_extractor is actually a
+        GNNExtractor. Since WLPlanFeedbackPolicy's meta-controller encoder
+        is a WLEmbeddingExtractor (not a GNNExtractor), gnn_extractor2 must
+        now ALWAYS be a fresh, independent GNNExtractor here, regardless of
+        shared_gnn - the discriminator can no longer end up sharing weights
+        with (or literally being the same object as) a non-GNN encoder.
         """
         env = make_city_env()
         policy = make_policy(env, shared_gnn=True)
 
+        self.assertIsNot(policy.gnn_extractor2, policy.gnn_extractor)
+        self.assertIsInstance(policy.gnn_extractor2, GNNExtractor)
+        self.assertNotIsInstance(policy.gnn_extractor2, WLEmbeddingExtractor)
+
+    def test_shared_gnn_true_still_aliases_for_the_original_gnn_only_policy(self):
+        """
+        Proves the fix doesn't regress the original, intended behavior:
+        for a plain (non-WL) GNNPlanFeedbackPolicy, whose meta-controller
+        encoder IS a GNNExtractor, shared_gnn=True must still make
+        gnn_extractor2 literally the same object as gnn_extractor - exactly
+        as Tradeoff/NLE/GNN-Taxi's existing, working configuration relies on.
+        """
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=True, policy_cls=GNNPlanFeedbackPolicy)
+
+        self.assertIsInstance(policy.gnn_extractor, GNNExtractor)
         self.assertIs(policy.gnn_extractor2, policy.gnn_extractor)
-        self.assertIsInstance(policy.gnn_extractor2, WLEmbeddingExtractor)
-        self.assertNotIsInstance(policy.gnn_extractor2, GNNExtractor)
+        self.assertIsInstance(policy.gnn_extractor2, GNNExtractor)
 
 
 class TestWLPlanFeedbackPolicyGetLatent(unittest.TestCase):

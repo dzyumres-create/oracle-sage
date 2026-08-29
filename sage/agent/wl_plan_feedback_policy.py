@@ -8,16 +8,16 @@
    self._encode_current_state, self.a2) stays fully GNN-based, for both
    the current state and every projected state, completely untouched here.
 
-   Known, deliberately-deferred gap: GNNFeedbackPolicy.__init__ aliases
-   self.gnn_extractor2 = self.gnn_extractor whenever shared_gnn=True
-   (graph_feedback_policy.py:244-249), with no type check. Since Taxi's
-   real training config passes --shared-gnn, constructing this policy
-   with shared_gnn=True (the default Taxi uses) makes gnn_extractor2 the
-   SAME WLEmbeddingExtractor object as gnn_extractor - not the independent
-   GNN discriminator the design requires. Fixing that aliasing check is an
-   explicitly separate, not-yet-implemented task (item (a) from the prior
-   investigation) - not addressed here. Callers must pass shared_gnn=False
-   until that fix lands, or gnn_extractor2 will silently be wrong.
+      Note: GNNFeedbackPolicy.__init__ aliases self.gnn_extractor2 =
+   self.gnn_extractor whenever shared_gnn=True (graph_feedback_policy.py:
+   244-249). This previously had no type check, meaning gnn_extractor2
+   would silently become the SAME WLEmbeddingExtractor object as this
+   policy's meta-controller encoder under shared_gnn=True - not the
+   independent GNN discriminator the design requires. This has since been
+   fixed there (an isinstance(self.gnn_extractor, GNNExtractor) check) -
+   gnn_extractor2 is now always a genuine, independent GNNExtractor,
+   regardless of shared_gnn's value, whenever the meta-controller's
+   encoder isn't itself a GNNExtractor.
 """
 import json
 
