@@ -3,7 +3,6 @@ Tests for the WL-colour wiring into the Taxi domain's graph construction:
 - env_to_graph (sage/domains/gym_taxi/utils/representations.py)
 - the JSON round-trip (sage/domains/utils/representations.py:
   graph_to_json/json_to_graph)
-- Planner.plan() (sage/domains/gym_taxi/simulator/planner.py)
 
 Uses scenario="city" (Oracle-SAGE's real Taxi training env), the same
 scenario the frozen vocab (sage/domains/utils/wl_vocab_taxi_city_L1.json)
@@ -13,7 +12,6 @@ Run from the repo root with:
     python -m unittest tests.test_wl_taxi_wiring -v
 """
 import unittest
-from copy import deepcopy
 
 import torch as th
 
@@ -27,7 +25,6 @@ import sage.domains.utils.build_wl_vocab  # noqa: F401
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.representations import env_to_graph, env_to_json
 from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, NUM_ITERATIONS
-from sage.domains.gym_taxi.simulator.planner import Planner, graph_to_networkx
 from sage.domains.utils.representations import json_to_graph
 from sage.domains.utils.wl_colours import wl_colours
 
@@ -101,47 +98,6 @@ class TestJsonRoundTrip(unittest.TestCase):
         d = batch.to_data_list()[0]
         self.assertFalse(hasattr(d, "wl_colours"))
         self.assertFalse(hasattr(d, "wl_histogram"))
-
-
-class TestPlannerWlWiring(unittest.TestCase):
-    def test_plan_attaches_wl_fields_recomputed_on_mutated_graph(self):
-        env = make_city_env()
-        js = env_to_json(env.sim)
-        batch = json_to_graph([[js]])
-        state_data = batch.to_data_list()[0]
-
-        nx_state = graph_to_networkx(state_data)
-        self.assertGreater(
-            len(nx_state.passengers), 0,
-            "TaxiWorldSimulator always adds one passenger at construction - this should never be empty",
-        )
-        goal = nx_state.passengers[0].node  # deliver-to-current-location style goal
-
-        planner = Planner()
-        projection, actions = planner.plan(deepcopy(state_data), goal)
-
-        self.assertTrue(hasattr(projection, "wl_colours"))
-        self.assertTrue(hasattr(projection, "wl_histogram"))
-        self.assertEqual(projection.wl_colours.dtype, th.long)
-        self.assertEqual(projection.wl_histogram.dtype, th.float)
-        # same per-graph shape convention as the live-state path (Step 2):
-        # wl_colours is per-node (no unsqueeze), wl_histogram is per-graph
-        # (unsqueeze(0)), matching x/global_features respectively.
-        self.assertEqual(tuple(projection.wl_colours.shape), (projection.x.shape[0],))
-        self.assertEqual(tuple(projection.wl_histogram.shape), tuple(state_data.wl_histogram.shape))
-
-        # the delivery removes the passenger's node -> the graph actually changed
-        self.assertNotEqual(projection.x.shape[0], state_data.x.shape[0])
-        # ... and the histogram must reflect that (recomputed post-mutation, not stale)
-        self.assertFalse(th.equal(projection.wl_histogram, state_data.wl_histogram))
-
-        # cross-check: recomputing directly on the final mutated tensors matches
-        expected_colours, expected_hist = wl_colours(
-            projection.x, projection.edge_index, projection.edge_attr,
-            num_iterations=NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
-        )
-        self.assertTrue(th.equal(projection.wl_colours, expected_colours))
-        self.assertTrue(th.equal(projection.wl_histogram, expected_hist.unsqueeze(0)))
 
 
 if __name__ == "__main__":

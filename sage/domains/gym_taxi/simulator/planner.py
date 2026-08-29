@@ -5,9 +5,6 @@ import networkx as nx
 
 from typing import List, NamedTuple
 
-from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, NUM_ITERATIONS as WL_NUM_ITERATIONS
-from sage.domains.utils.wl_colours import wl_colours
-
 
 class Taxi(NamedTuple):
     node: int
@@ -42,18 +39,6 @@ class Planner:
 
         if actions == []:
             actions = [state.taxi.location]
-
-        # Recompute WL colours on the final, fully-mutated projection (same
-        # frozen vocab/L as env_to_graph's live-state wiring - see
-        # sage/domains/gym_taxi/utils/wl_vocab_cache.py - so a projected
-        # graph carries the same wl_colours/wl_histogram fields, in the
-        # same shapes, as a live-state graph).
-        wl_colour_ids, wl_histogram = wl_colours(
-            projection.x, projection.edge_index, projection.edge_attr,
-            num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
-        )
-        projection.wl_colours = wl_colour_ids
-        projection.wl_histogram = wl_histogram.unsqueeze(0)
 
         return increment_timer(projection,actions)
 
