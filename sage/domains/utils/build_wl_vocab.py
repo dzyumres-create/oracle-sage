@@ -131,7 +131,12 @@ if not hasattr(np.random.Generator, "randint"):
             self._generator = generator
 
         def randint(self, low, high=None):
+            if hasattr(self._generator, "randint"):
+                # already a real RandomState (e.g. RCP's pinned gym/numpy) - use its native method
+                return self._generator.randint(low, high) if high is not None else self._generator.randint(low)
+            # genuinely a modern Generator with no .randint - use the real replacement
             return self._generator.integers(low, high)
+
 
         def __getattr__(self, name):
             return getattr(self._generator, name)

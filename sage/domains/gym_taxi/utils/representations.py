@@ -49,9 +49,9 @@ def nextwork_to_graph(network,mapping):
 
 
 def env_to_graph(env):
-    node_feats = np.array([v['attr'] for _,v in sorted(env.graph.nodes.items())],dtype=np.float)
+    node_feats = np.array([v['attr'] for _,v in sorted(env.graph.nodes.items())],dtype=float)
     edges = nx.to_edgelist(env.graph)
-    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=np.float)
+    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=float)
     edge_index = np.array([[x,y] for (x,y,_) in edges]).T
     
     #mask need to be different for SAGE vs SR-DRL. In SAGE, it's probably fine to let mask be true everywhere.
@@ -59,15 +59,15 @@ def env_to_graph(env):
     #Conveniently, this is equal to the taxis location, and all nodes which are adjacent to it. 
     #Need to be a bit careful with this because this is masking a number of actions which can be taken in normal taxi: pickup when no passenger present, dropoff when no passenger in taxi, and move into walls.
     if env.planning == False:
-        mask = np.zeros(len(node_feats),dtype=np.bool)
+        mask = np.zeros(len(node_feats),dtype=bool)
         mask[env.taxi.location]=True
         for x in env.graph[env.taxi.location]:
             mask[x]=True
     else:
-        mask = np.ones(len(node_feats),dtype=np.bool)
+        mask = np.ones(len(node_feats),dtype=bool)
 
 
-    global_feats = np.zeros(EMB_SIZE,dtype=np.float)
+    global_feats = np.zeros(EMB_SIZE,dtype=float)
     time_left = (env.timeout-env.time)/env.timeout
     global_feats[0] = time_left
 

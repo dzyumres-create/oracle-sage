@@ -78,7 +78,7 @@ class PlanFeedback_A2C(Feedback_A2C):
             plan_lengths = np.array([len(p) for p in plans])
             max_plan_length = max(plan_lengths)
             env_finished = plan_lengths == 0
-            plans_grid = -np.ones((len(plan_lengths),max_plan_length),dtype=np.int) #create a grid of plans
+            plans_grid = -np.ones((len(plan_lengths),max_plan_length),dtype=int) #create a grid of plans
             for i,p in enumerate(plans):
                 plans_grid[i,:plan_lengths[i]]=p
             plan_step=0
