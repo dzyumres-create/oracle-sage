@@ -88,7 +88,8 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         self.gnn_extractor = WLEmbeddingExtractor(self.wl_vocab_size, EMB_SIZE)
 
     def _build_value_net(self) -> None:
-        self.value_net = nn.Linear(self.wl_vocab_size, 1)
+        # +1 for time_left, concatenated onto the histogram in _get_latent.
+        self.value_net = nn.Linear(self.wl_vocab_size + 1, 1)
 
     def _get_latent(self, obs: th.Tensor):
         """
@@ -96,8 +97,9 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         encoder call differs: a WL-colour embedding lookup over
         batch.wl_colours instead of message-passing over
         batch.x/edge_attr/edge_index, and the (untrainable, precomputed)
-        WL colour histogram is used directly as the global embedding - no
-        transform applied, per design.
+        WL colour histogram, concatenated with time_left, is used directly
+        as the global embedding - no transform applied to either, per
+        design.
 
         :param obs: Observation
         :return: (batch, symbolic_batch), batch.x/global_features now
@@ -105,8 +107,15 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         """
         batch, symbolic_batch = self.extract_features(obs, self.device)
 
+        # batch.global_features here is still the ORIGINAL raw global_feats
+        # from env_to_graph (NodeExtractor/features_extractor only ever
+        # mutates .x, never .global_features) - index 0 is time_left,
+        # (env.timeout-env.time)/env.timeout. Must be read before the
+        # overwrite below replaces it with the WL-based latent_global.
+        time_left = batch.global_features[:, 0:1]  # [num_graphs, 1]
+
         latent_nodes = self.gnn_extractor(batch.wl_colours)  # [total_nodes, EMB_SIZE]
-        latent_global = batch.wl_histogram  # [num_graphs, wl_vocab_size], used as-is
+        latent_global = th.cat([batch.wl_histogram, time_left], dim=1)  # [num_graphs, wl_vocab_size + 1]
 
         batch.x = latent_nodes
         batch.global_features = latent_global
