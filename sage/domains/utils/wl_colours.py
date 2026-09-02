@@ -152,7 +152,7 @@ def refine(
         d = dst[e]
         neighbours[s].append((node_colours_list[d], edge_labels_list[e]))
 
-    new_colours = th.empty(n, dtype=th.long)
+    new_colours = th.empty(n, dtype=th.long, device=node_colours.device)
     for v in range(n):
         signature = (node_colours_list[v], tuple(sorted(neighbours[v])))
         new_colours[v] = _resolve(signature, vocab, frozen)
@@ -214,7 +214,7 @@ def wl_colours(
     _check_frozen_vocab(vocab, frozen, "wl_colours")
 
     type_colours = initial_colours(x).tolist()
-    colours = th.empty(x.shape[0], dtype=th.long)
+    colours = th.empty(x.shape[0], dtype=th.long, device=x.device)
     for v, type_id in enumerate(type_colours):
         signature = ("init", type_id)
         colours[v] = _resolve(signature, vocab, frozen)
@@ -223,7 +223,7 @@ def wl_colours(
     for _ in range(num_iterations):
         colours = refine(colours, edge_index, labels, vocab, frozen=frozen)
 
-    histogram = th.zeros(len(vocab), dtype=th.float)
+    histogram = th.zeros(len(vocab), dtype=th.float, device=colours.device)
     for c in colours.tolist():
         histogram[c] += 1
 

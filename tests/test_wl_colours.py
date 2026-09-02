@@ -408,5 +408,75 @@ class TestWlColoursSmoke(unittest.TestCase):
         self.assertEqual(histogram.sum().item(), 4)
 
 
+@unittest.skipUnless(th.cuda.is_available(), "requires CUDA - run on RCP to actually exercise this")
+class TestWlColoursGpuDevicePlacement(unittest.TestCase):
+    """
+    Regression tests for the device-mismatch bug: wl_colours()/refine()
+    used to construct their output tensors (th.empty/th.zeros) with no
+    device= kwarg, so they always came back on CPU regardless of the
+    input graph's actual device - fine for the live-state path (which
+    round-trips through JSON and gets moved to GPU later anyway), but a
+    hard crash for planner.py's projected-state path, which mutates an
+    already-on-GPU batch directly with no later move.
+    Skipped entirely (not just "passes vacuously") unless CUDA is
+    genuinely available - meaningless on a CPU-only sandbox, must be run
+    on RCP to actually exercise the fix.
+    """
+
+    def test_wl_colours_returns_tensors_on_the_input_device_not_cpu(self):
+        device = th.device("cuda")
+        x, edge_index, edge_attr = make_taxi_graph()
+        x, edge_index, edge_attr = x.to(device), edge_index.to(device), edge_attr.to(device)
+
+        colours, histogram = wl_colours(x, edge_index, edge_attr, num_iterations=1, vocab={})
+
+        self.assertEqual(colours.device.type, "cuda")
+        self.assertEqual(histogram.device.type, "cuda")
+
+    def test_refine_returns_tensor_on_the_input_device_not_cpu(self):
+        device = th.device("cuda")
+        x, edge_index, edge_attr = make_taxi_graph()
+        x, edge_index, edge_attr = x.to(device), edge_index.to(device), edge_attr.to(device)
+
+        node_colours = initial_colours(x)
+        labels = edge_labels(edge_attr)
+        new_colours = refine(node_colours, edge_index, labels, {})
+
+        self.assertEqual(new_colours.device.type, "cuda")
+
+    def test_frozen_path_also_returns_tensors_on_the_input_device(self):
+        device = th.device("cuda")
+        x, edge_index, edge_attr = make_taxi_graph()
+        x, edge_index, edge_attr = x.to(device), edge_index.to(device), edge_attr.to(device)
+
+        vocab = {}
+        wl_colours(x, edge_index, edge_attr, num_iterations=1, vocab=vocab)
+        freeze_vocab(vocab)
+
+        colours, histogram = wl_colours(x, edge_index, edge_attr, num_iterations=1, vocab=vocab, frozen=True)
+
+        self.assertEqual(colours.device.type, "cuda")
+        self.assertEqual(histogram.device.type, "cuda")
+
+    def test_values_identical_between_cpu_and_gpu_only_device_differs(self):
+        """
+        Moving a graph to GPU must not change the computed colours or
+        histogram values - only where the result tensors live. Reuses the
+        hand-derived taxi graph fixture (see TestHandVerifiedRefinement)
+        so the CPU side is itself already independently hand-verified.
+        """
+        x_cpu, edge_index_cpu, edge_attr_cpu = make_taxi_graph()
+        device = th.device("cuda")
+        x_gpu = x_cpu.to(device)
+        edge_index_gpu = edge_index_cpu.to(device)
+        edge_attr_gpu = edge_attr_cpu.to(device)
+
+        colours_cpu, histogram_cpu = wl_colours(x_cpu, edge_index_cpu, edge_attr_cpu, num_iterations=1, vocab={})
+        colours_gpu, histogram_gpu = wl_colours(x_gpu, edge_index_gpu, edge_attr_gpu, num_iterations=1, vocab={})
+
+        self.assertTrue(th.equal(colours_cpu, colours_gpu.cpu()))
+        self.assertTrue(th.equal(histogram_cpu, histogram_gpu.cpu()))
+
+
 if __name__ == "__main__":
     unittest.main()
