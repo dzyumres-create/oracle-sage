@@ -129,19 +129,19 @@ def select_action(actions, projected_values):
     return (th.gather(actions,0,indexes.unsqueeze(0)).squeeze(), values)
 
 class PathValueNet(nn.Module):
-    def __init__(self,layer_norm):
+    def __init__(self,layer_norm,input_dim: int = EMB_SIZE):
         super(PathValueNet, self).__init__()
         self.layer_norm = layer_norm
         if self.layer_norm:
-            self.ln1 = nn.LayerNorm(EMB_SIZE)
-            self.ln2 = nn.LayerNorm(EMB_SIZE)
-        self.path_value_net = nn.Linear(EMB_SIZE*2, 1)
-        
+            self.ln1 = nn.LayerNorm(input_dim)
+            self.ln2 = nn.LayerNorm(input_dim)
+        self.path_value_net = nn.Linear(input_dim*2, 1)
+
     def forward(self,s1,s2):
         if self.layer_norm:
             s1 = self.ln1(s1)
             s2 = self.ln1(s2)
-        return self.path_value_net(th.cat((s1, s2),1))    
+        return self.path_value_net(th.cat((s1, s2),1))
 
 class GNNFeedbackPolicy(GNNPolicy):
     """

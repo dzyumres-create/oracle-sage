@@ -22,12 +22,16 @@ import torch as th
 # code under test does NOT depend on this - only this test harness does.
 import sage.domains.utils.build_wl_vocab  # noqa: F401
 
+from copy import deepcopy
+
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.representations import env_to_json
+from sage.domains.gym_taxi.simulator.planner import Planner, graph_to_networkx
 from sage.domains.utils.representations import json_to_graph
-from sage.agent.graph_policy import GNNExtractor
+from sage.agent.graph_policy import GNNExtractor, EMB_SIZE
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy, WLEmbeddingExtractor
+from torch_geometric.data import Batch
 
 
 def make_city_env():
@@ -205,6 +209,123 @@ class TestWLPlanFeedbackPolicyGetLatent(unittest.TestCase):
         # deterministic exact value: d(value.sum())/d(weight[0,-1]) ==
         # time_left == 1.0 for this single, freshly-reset graph
         self.assertAlmostEqual(time_left_weight_grad.item(), 1.0, places=5)
+
+
+def make_projected_batch(env):
+    """
+    Builds a real projected-state Batch via Planner.plan(), the same way
+    project_actions does internally (planner.plan(deepcopy(state), goal)
+    then Batch.from_data_list([...])), so tests can exercise
+    _encode_projected_state against a genuine post-planner projection.
+    """
+    js = env_to_json(env.sim)
+    raw_batch = json_to_graph([[js]])
+    state_data = raw_batch.to_data_list()[0]
+
+    nx_state = graph_to_networkx(state_data)
+    assert len(nx_state.passengers) > 0, "TaxiWorldSimulator always adds one passenger at construction"
+    goal = nx_state.passengers[0].node
+
+    projection, _ = Planner().plan(deepcopy(state_data), goal)
+    return Batch.from_data_list([projection])
+
+
+class TestDiscriminatorReadsWlHistogram(unittest.TestCase):
+    def test_path_value_net_resized_for_wl_vocab_not_emb_size(self):
+        env = make_city_env()
+        wl_policy = make_policy(env, shared_gnn=False, policy_cls=WLPlanFeedbackPolicy)
+        gnn_policy = make_policy(env, shared_gnn=False, policy_cls=GNNPlanFeedbackPolicy)
+
+        expected_wl_dim = (wl_policy.wl_vocab_size + 1) * 2
+        self.assertEqual(wl_policy.path_value_net.path_value_net.in_features, expected_wl_dim)
+
+        # baseline (GNN) policy must be completely unaffected by the new
+        # input_dim parameter's default - still exactly EMB_SIZE*2
+        self.assertEqual(gnn_policy.path_value_net.path_value_net.in_features, EMB_SIZE * 2)
+
+    def test_encode_current_state_last_column_is_genuine_time_left(self):
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=False, policy_cls=WLPlanFeedbackPolicy)
+
+        js = env_to_json(env.sim)
+        # independent of _get_latent/_encode_current_state - a fresh parse
+        symbolic_batch = json_to_graph([[js]])
+        expected_time_left = symbolic_batch.global_features[:, 0:1].clone()
+        expected_histogram = symbolic_batch.wl_histogram.clone()
+
+        result = policy._encode_current_state(symbolic_batch)
+
+        self.assertEqual(tuple(result.shape), (1, policy.wl_vocab_size + 1))
+        self.assertTrue(th.equal(result[:, -1:], expected_time_left))
+        self.assertEqual(result[:, -1:].item(), 1.0)  # freshly reset: time_left == 1.0 exactly
+        self.assertTrue(th.equal(result[:, :-1], expected_histogram))
+
+    def test_encode_projected_state_last_column_is_genuine_time_left(self):
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=False, policy_cls=WLPlanFeedbackPolicy)
+
+        projected_batch = make_projected_batch(env)
+        # ground truth read directly off the projected batch's own
+        # attributes, BEFORE passing it through the method under test
+        expected_time_left = projected_batch.global_features[:, 0:1].clone()
+        expected_histogram = projected_batch.wl_histogram.clone()
+        # a real delivery took at least one simulated step, so time_left
+        # must have moved off the fresh-reset value of 1.0 - confirms this
+        # is reading the ACTUAL (decremented) projected time, not a stale
+        # or default value
+        self.assertLess(expected_time_left.item(), 1.0)
+
+        result = policy._encode_projected_state(projected_batch)
+
+        self.assertEqual(tuple(result.shape), (1, policy.wl_vocab_size + 1))
+        self.assertTrue(th.equal(result[:, -1:], expected_time_left))
+        self.assertTrue(th.equal(result[:, :-1], expected_histogram))
+
+
+class TestGnnExtractor2GenuinelyUnused(unittest.TestCase):
+    def test_gnn_extractor2_never_invoked_in_wl_choose_top_action_path(self):
+        """
+        Spies on gnn_extractor2.forward (not just checking it's
+        unreachable by code inspection) to prove the GNN dependency was
+        genuinely removed from WLPlanFeedbackPolicy's discriminator path,
+        not just made unreachable by accident. num_planning_choices
+        defaults to 3 (>1), so this exercises the real
+        _encode_current_state/_encode_projected_state path, not the
+        num_planning_choices==1 shortcut.
+        """
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=False, policy_cls=WLPlanFeedbackPolicy)
+
+        def _raise_if_called(*args, **kwargs):
+            raise AssertionError("gnn_extractor2 was called - should be fully unused here")
+        policy.gnn_extractor2.forward = _raise_if_called
+
+        js = env_to_json(env.sim)
+        obs = np.array([[js]], dtype=np.dtype("U250000"))
+
+        # must complete without the spy's AssertionError firing
+        actions, values, log_prob, explored, plans = policy.forward(obs)
+        self.assertIsNotNone(actions)
+
+    def test_spy_mechanism_itself_actually_detects_a_real_call(self):
+        """
+        Positive control for the test above: the same spy technique, on
+        the same code path, but for the GNN baseline (where gnn_extractor2
+        genuinely IS called) - proves the spy isn't silently inert/always
+        passing, i.e. the test above is a meaningful negative result.
+        """
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=False, policy_cls=GNNPlanFeedbackPolicy)
+
+        def _raise_if_called(*args, **kwargs):
+            raise AssertionError("gnn_extractor2 was called")
+        policy.gnn_extractor2.forward = _raise_if_called
+
+        js = env_to_json(env.sim)
+        obs = np.array([[js]], dtype=np.dtype("U250000"))
+
+        with self.assertRaises(AssertionError):
+            policy.forward(obs)
 
 
 if __name__ == "__main__":

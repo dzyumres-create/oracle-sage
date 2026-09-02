@@ -1,12 +1,18 @@
 """
 .. module:: wl_plan_feedback_policy
    :synopsis: WLPlanFeedbackPolicy - Taxi's meta-controller with a
-   Weisfeiler-Leman colour-embedding encoder in place of message-passing.
+   Weisfeiler-Leman colour-embedding encoder in place of message-passing,
+   AND (per a later supervisor-directed redesign) a discriminator
+   (PathValueNet) that reads WL's global histogram output directly,
+   instead of running its own independent GNN pass.
 
-   Per the confirmed scope: ONLY the meta-controller's encoder changes.
-   The discriminator (self.gnn_extractor2, PathValueNet,
-   self._encode_current_state, self.a2) stays fully GNN-based, for both
-   the current state and every projected state, completely untouched here.
+   self.gnn_extractor2 (a genuine, independent GNNExtractor - see the
+   isinstance-guard note below) and self.a2 are still constructed (the
+   shared base class always builds them), but are now UNUSED/inert for
+   this policy: _encode_current_state/_encode_projected_state no longer
+   call gnn_extractor2 at all. Left in place deliberately rather than
+   removed - nothing assumes it's absent, only code that assumed it was
+   present-and-GNN-shaped, none of which runs anymore here.
 
       Note: GNNFeedbackPolicy.__init__ aliases self.gnn_extractor2 =
    self.gnn_extractor whenever shared_gnn=True (graph_feedback_policy.py:
@@ -17,14 +23,18 @@
    fixed there (an isinstance(self.gnn_extractor, GNNExtractor) check) -
    gnn_extractor2 is now always a genuine, independent GNNExtractor,
    regardless of shared_gnn's value, whenever the meta-controller's
-   encoder isn't itself a GNNExtractor.
+   encoder isn't itself a GNNExtractor. Now moot for the discriminator's
+   own data path (see above), but left as-is since other things (self.a2)
+   still exist unconditionally in the shared base class regardless.
 """
 import json
 
 import torch as th
 from torch import nn
+from torch_geometric.data import Batch
 
 from sage.agent.graph_policy import EMB_SIZE
+from sage.agent.graph_feedback_policy import PathValueNet
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH, _decode_signature
 
@@ -80,7 +90,21 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         # called from within that chain, needs self.wl_vocab_path already
         # present to load the vocab and size the embedding table.
         self.wl_vocab_path = wl_vocab_path
+        # GNNFeedbackPolicy.__init__ doesn't retain layer_norm as an
+        # attribute (it's a bare local, used once to construct the base
+        # class's path_value_net) - capture it here (mirroring its own
+        # default of False) so _build_path_value_net can reconstruct
+        # PathValueNet with it after super().__init__() runs.
+        self._layer_norm = kwargs.get("layer_norm", False)
         super().__init__(*args, **kwargs)
+        # path_value_net is built by GNNFeedbackPolicy.__init__ (inside
+        # the super().__init__() call above) sized for EMB_SIZE - replace
+        # it here with one sized for wl_vocab_size + 1. Same relative
+        # timing as the base class's own construction (after the
+        # optimizer is already built - a pre-existing condition, not
+        # introduced or fixed here), so this doesn't change whether
+        # path_value_net's parameters are optimized, only its shape.
+        self._build_path_value_net()
 
     def _build_gnn_extractor(self) -> None:
         self._wl_vocab = _load_vocab(self.wl_vocab_path)
@@ -90,6 +114,40 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
     def _build_value_net(self) -> None:
         # +1 for time_left, concatenated onto the histogram in _get_latent.
         self.value_net = nn.Linear(self.wl_vocab_size + 1, 1)
+
+    def _build_path_value_net(self) -> None:
+        # +1 for time_left, concatenated onto the histogram in
+        # _encode_current_state/_encode_projected_state below - matches
+        # value_net's own +1 convention.
+        self.path_value_net = PathValueNet(layer_norm=self._layer_norm, input_dim=self.wl_vocab_size + 1)
+
+    def _encode_current_state(self, symbolic_batch: Batch) -> th.Tensor:
+        """
+        Overrides GNNPlanFeedbackPolicy._encode_current_state: no GNN pass.
+        symbolic_batch (the raw, untouched current-state batch) already
+        carries wl_histogram (from env_to_graph's wiring) and the original
+        global_features (index 0 = time_left, untouched by the
+        meta-controller's encoder) - concatenate them directly, mirroring
+        _get_latent's own construction of latent_global.
+
+        :param symbolic_batch: the raw current-state batch
+        :return: [num_graphs, wl_vocab_size + 1] discriminator input
+        """
+        time_left = symbolic_batch.global_features[:, 0:1]
+        return th.cat([symbolic_batch.wl_histogram, time_left], dim=1)
+
+    def _encode_projected_state(self, projected_batch: Batch) -> th.Tensor:
+        """
+        Overrides GNNPlanFeedbackPolicy._encode_projected_state: same
+        pattern as _encode_current_state, for a projected (post-planner)
+        state. Depends on Planner.plan() attaching wl_colours/wl_histogram
+        to projections (sage/domains/gym_taxi/simulator/planner.py).
+
+        :param projected_batch: a projected-state batch from project_actions
+        :return: [num_graphs, wl_vocab_size + 1] discriminator input
+        """
+        time_left = projected_batch.global_features[:, 0:1]
+        return th.cat([projected_batch.wl_histogram, time_left], dim=1)
 
     def _get_latent(self, obs: th.Tensor):
         """
