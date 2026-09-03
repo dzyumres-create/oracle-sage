@@ -279,6 +279,16 @@ class GNNPolicy(BasePolicy):
             edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
         )
 
+    def _build_gnn_extractor2(self) -> None:
+        """
+        Hook for a second (discriminator) GNN encoder, called from
+        _build() before optimizer construction - same pattern and same
+        reason as _build_value_net()/_build_path_value_net(). No-op here:
+        plain GNNPolicy has no discriminator. Overridden by
+        GNNFeedbackPolicy to actually construct/alias one.
+        """
+        pass
+
     def _build_value_net(self) -> None:
         """
         Create the value network. Factored out of _build() so a subclass
@@ -286,6 +296,16 @@ class GNNPolicy(BasePolicy):
         before _build()'s optimizer construction captures self.parameters().
         """
         self.value_net = nn.Linear(EMB_SIZE, 1)
+
+    def _build_path_value_net(self) -> None:
+        """
+        Hook for a discriminator/path-value network, called from _build()
+        before optimizer construction - same pattern and same reason as
+        _build_value_net(). No-op here: plain GNNPolicy has no
+        discriminator. Overridden by GNNFeedbackPolicy (and, transitively,
+        WLPlanFeedbackPolicy) to actually construct one.
+        """
+        pass
 
     def _build(self, lr_schedule: Schedule) -> None:
         """
@@ -295,6 +315,7 @@ class GNNPolicy(BasePolicy):
             lr_schedule(1) is the initial learning rate
         """
         self._build_gnn_extractor()
+        self._build_gnn_extractor2()
 
         latent_dim_pi = EMB_SIZE
 
@@ -340,6 +361,7 @@ class GNNPolicy(BasePolicy):
             raise NotImplementedError(f"Unsupported distribution '{self.action_dist}'.")
 
         self._build_value_net()
+        self._build_path_value_net()
         # Init weights: use orthogonal initialization
         # with small initial weight for the output
         if self.ortho_init:

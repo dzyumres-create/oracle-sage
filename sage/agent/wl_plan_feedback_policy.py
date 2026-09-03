@@ -90,21 +90,15 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         # called from within that chain, needs self.wl_vocab_path already
         # present to load the vocab and size the embedding table.
         self.wl_vocab_path = wl_vocab_path
-        # GNNFeedbackPolicy.__init__ doesn't retain layer_norm as an
-        # attribute (it's a bare local, used once to construct the base
-        # class's path_value_net) - capture it here (mirroring its own
-        # default of False) so _build_path_value_net can reconstruct
-        # PathValueNet with it after super().__init__() runs.
-        self._layer_norm = kwargs.get("layer_norm", False)
         super().__init__(*args, **kwargs)
-        # path_value_net is built by GNNFeedbackPolicy.__init__ (inside
-        # the super().__init__() call above) sized for EMB_SIZE - replace
-        # it here with one sized for wl_vocab_size + 1. Same relative
-        # timing as the base class's own construction (after the
-        # optimizer is already built - a pre-existing condition, not
-        # introduced or fixed here), so this doesn't change whether
-        # path_value_net's parameters are optimized, only its shape.
-        self._build_path_value_net()
+        # No manual _build_path_value_net() call needed here: GNNPolicy._build()
+        # (called from within super().__init__()'s chain, before optimizer
+        # construction) already calls self._build_path_value_net() via
+        # dynamic dispatch, which resolves to the override below - so
+        # path_value_net is built once, at the correct time, sized
+        # correctly, with its parameters actually captured by the
+        # optimizer. self.layer_norm is set by GNNFeedbackPolicy.__init__
+        # before that dispatch happens, so it's already available.
 
     def _build_gnn_extractor(self) -> None:
         self._wl_vocab = _load_vocab(self.wl_vocab_path)
@@ -116,10 +110,13 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         self.value_net = nn.Linear(self.wl_vocab_size + 1, 1)
 
     def _build_path_value_net(self) -> None:
-        # +1 for time_left, concatenated onto the histogram in
-        # _encode_current_state/_encode_projected_state below - matches
-        # value_net's own +1 convention.
-        self.path_value_net = PathValueNet(layer_norm=self._layer_norm, input_dim=self.wl_vocab_size + 1)
+        # Overrides GNNFeedbackPolicy._build_path_value_net (called from
+        # GNNPolicy._build(), before optimizer construction - see that
+        # method's docstring). +1 for time_left, concatenated onto the
+        # histogram in _encode_current_state/_encode_projected_state below
+        # - matches value_net's own +1 convention. self.layer_norm is set
+        # by GNNFeedbackPolicy.__init__ before _build() runs.
+        self.path_value_net = PathValueNet(layer_norm=self.layer_norm, input_dim=self.wl_vocab_size + 1)
 
     def _encode_current_state(self, symbolic_batch: Batch) -> th.Tensor:
         """

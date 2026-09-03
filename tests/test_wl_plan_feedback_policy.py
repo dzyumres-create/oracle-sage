@@ -31,6 +31,7 @@ from sage.domains.utils.representations import json_to_graph
 from sage.agent.graph_policy import GNNExtractor, EMB_SIZE
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy, WLEmbeddingExtractor
+from sage.agent.graph_feedback_policy import PathValueNet
 from torch_geometric.data import Batch
 
 
@@ -326,6 +327,121 @@ class TestGnnExtractor2GenuinelyUnused(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             policy.forward(obs)
+
+
+def optimizer_param_ids(policy):
+    ids = set()
+    for group in policy.optimizer.param_groups:
+        for p in group["params"]:
+            ids.add(id(p))
+    return ids
+
+
+class TestPathValueNetOptimizerTiming(unittest.TestCase):
+    """
+    Regression tests for the optimizer-timing fix: path_value_net (and
+    gnn_extractor2) used to be constructed in GNNFeedbackPolicy.__init__
+    AFTER super().__init__() already finished building self.optimizer, so
+    their parameters were silently excluded from training entirely - for
+    every policy, GNN baseline included. Fixed by moving construction into
+    _build_path_value_net()/_build_gnn_extractor2() hooks, called from
+    GNNPolicy._build() before optimizer construction (same pattern as the
+    earlier value_net/gnn_extractor fix).
+    """
+
+    def test_path_value_net_params_now_in_optimizer_gnn_baseline(self):
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=True, policy_cls=GNNPlanFeedbackPolicy)
+
+        included = optimizer_param_ids(policy)
+        pv_params = list(policy.path_value_net.parameters())
+        self.assertGreater(len(pv_params), 0)
+        self.assertTrue(all(id(p) in included for p in pv_params))
+
+    def test_path_value_net_params_now_in_optimizer_wl_policy(self):
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=True, policy_cls=WLPlanFeedbackPolicy)
+
+        included = optimizer_param_ids(policy)
+        pv_params = list(policy.path_value_net.parameters())
+        self.assertGreater(len(pv_params), 0)
+        self.assertTrue(all(id(p) in included for p in pv_params))
+
+    def test_gnn_extractor2_params_now_in_optimizer_both_shared_gnn_branches(self):
+        env = make_city_env()
+
+        for shared_gnn in (True, False):
+            with self.subTest(shared_gnn=shared_gnn):
+                policy = make_policy(env, shared_gnn=shared_gnn, policy_cls=GNNPlanFeedbackPolicy)
+                included = optimizer_param_ids(policy)
+                ge2_params = list(policy.gnn_extractor2.parameters())
+                self.assertGreater(len(ge2_params), 0)
+                self.assertTrue(all(id(p) in included for p in ge2_params))
+
+    def test_wl_gnn_extractor2_still_independent_after_timing_fix(self):
+        """
+        Confirms the timing fix didn't disturb the earlier isinstance-guard
+        fix: for WLPlanFeedbackPolicy, gnn_extractor2 must still be a
+        genuine, independent GNNExtractor (not aliased to the WL
+        meta-controller encoder), even with shared_gnn=True.
+        """
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=True, policy_cls=WLPlanFeedbackPolicy)
+
+        self.assertIsNot(policy.gnn_extractor2, policy.gnn_extractor)
+        self.assertIsInstance(policy.gnn_extractor2, GNNExtractor)
+        self.assertNotIsInstance(policy.gnn_extractor2, WLEmbeddingExtractor)
+
+    def test_path_value_net_forward_pass_unaffected_by_timing_fix(self):
+        """
+        The timing fix changes WHEN path_value_net is registered with the
+        optimizer, not what it computes. Confirms this directly: load a
+        fixed state_dict into policy.path_value_net, run a fixed input
+        through it, and compare against a standalone PathValueNet
+        (constructed completely independently of any policy/_build()
+        machinery) given the identical weights and input - same
+        architecture, same weights, same forward-pass math, only the
+        timing of optimizer registration changed.
+        """
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=False, policy_cls=WLPlanFeedbackPolicy)
+
+        input_dim = policy.wl_vocab_size + 1
+        standalone = PathValueNet(layer_norm=False, input_dim=input_dim)
+
+        # deterministic, fixed weights - not whatever random init either object got
+        with th.no_grad():
+            for p in policy.path_value_net.parameters():
+                p.fill_(0.1)
+            for p in standalone.parameters():
+                p.fill_(0.1)
+
+        s1 = th.arange(input_dim, dtype=th.float).unsqueeze(0) * 0.01
+        s2 = th.arange(input_dim, dtype=th.float).unsqueeze(0) * 0.02
+
+        out_policy = policy.path_value_net(s1, s2)
+        out_standalone = standalone(s1, s2)
+
+        self.assertTrue(th.equal(out_policy, out_standalone))
+
+    def test_gnn_baseline_end_to_end_forward_still_works_after_timing_fix(self):
+        """
+        Full end-to-end smoke check that the shared-file changes
+        (graph_policy.py/graph_feedback_policy.py, used by Tradeoff/NLE
+        too, not just Taxi/WL) don't break the real forward pass -
+        exercises the real planner-based _choose_top_action path
+        (num_planning_choices defaults to 3, so this isn't the
+        num_planning_choices==1 shortcut).
+        """
+        env = make_city_env()
+        policy = make_policy(env, shared_gnn=True, policy_cls=GNNPlanFeedbackPolicy)
+
+        js = env_to_json(env.sim)
+        obs = np.array([[js]], dtype=np.dtype("U250000"))
+
+        actions, values, log_prob, explored, plans = policy.forward(obs)
+        self.assertIsNotNone(actions)
+        self.assertFalse(th.isnan(values).any())
 
 
 if __name__ == "__main__":
