@@ -16,8 +16,11 @@
 from math import floor, ceil
 import json
 import numpy as np
+import torch as th
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
+from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, NUM_ITERATIONS as WL_NUM_ITERATIONS
 from sage.domains.utils.representations import graph_to_json, EMB_SIZE
+from sage.domains.utils.wl_colours import wl_colours
 import networkx as nx
 import cv2
 
@@ -46,9 +49,9 @@ def nextwork_to_graph(network,mapping):
 
 
 def env_to_graph(env):
-    node_feats = np.array([v['attr'] for _,v in sorted(env.graph.nodes.items())],dtype=np.float64)
+    node_feats = np.array([v['attr'] for _,v in sorted(env.graph.nodes.items())],dtype=float)
     edges = nx.to_edgelist(env.graph)
-    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=np.float64)
+    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=float)
     edge_index = np.array([[x,y] for (x,y,_) in edges]).T
 
     #mask need to be different for SAGE vs SR-DRL. In SAGE, it's probably fine to let mask be true everywhere.
@@ -64,11 +67,22 @@ def env_to_graph(env):
         mask = np.ones(len(node_feats),dtype=bool)
 
 
-    global_feats = np.zeros(EMB_SIZE,dtype=np.float64)
+    global_feats = np.zeros(EMB_SIZE,dtype=float)
     time_left = (env.timeout-env.time)/env.timeout
     global_feats[0] = time_left
 
-    return node_feats, edge_feats, edge_index, mask, global_feats
+    # WL colours (see sage/domains/gym_taxi/utils/wl_vocab_cache.py: fixed
+    # to a specific frozen, validated vocab - frozen=True means unseen
+    # signatures resolve to OOV rather than growing the vocab at runtime).
+    _x = th.as_tensor(node_feats, dtype=th.float)
+    _edge_index = th.as_tensor(edge_index, dtype=th.long)
+    _edge_attr = th.as_tensor(edge_feats, dtype=th.float)
+    wl_colour_ids, wl_histogram = wl_colours(
+        _x, _edge_index, _edge_attr,
+        num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
+    )
+
+    return node_feats, edge_feats, edge_index, mask, global_feats, wl_colour_ids.tolist(), wl_histogram.tolist()
 
 
 def env_to_vilg_json(env):

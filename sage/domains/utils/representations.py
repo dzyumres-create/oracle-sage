@@ -39,26 +39,40 @@ def json_to_graph(js):
     :param js: list of json objects representing vector of environments
     :return: world state in batch (multi graph) format
     """
-    envs = [json.loads(j[0]) for j in js] 
+    envs = [json.loads(j[0]) for j in js]
     data =  [Data(x = th.as_tensor(env["node_feats"]),edge_attr= th.as_tensor(env["edge_feats"]),edge_index = th.as_tensor(env["edge_index"])) for env in envs]
     for d,env in zip(data,envs):
         d.mask = th.as_tensor(env["mask"])#.unsqueeze(0)
         d.global_features = th.as_tensor(env["global_feats"]).unsqueeze(0) #th.zeros(1,EMB_SIZE)
+        # Optional fields: only present for domains that populate them (e.g.
+        # gym_taxi's WL-colour wiring) - absent for anything else, so those
+        # domains' Data objects are completely unaffected.
+        if "wl_colours" in env:
+            d.wl_colours = th.as_tensor(env["wl_colours"])
+        if "wl_histogram" in env:
+            d.wl_histogram = th.as_tensor(env["wl_histogram"]).unsqueeze(0)
     batch = Batch.from_data_list(data)
     return batch
 
-def graph_to_json(node_feats, edge_feats, edge_index, mask, global_feats):
+def graph_to_json(node_feats, edge_feats, edge_index, mask, global_feats, wl_colours=None, wl_histogram=None):
     """
     General purpose converter from graph to json format.
 
+    `wl_colours`/`wl_histogram` are optional and only included in the
+    output when provided (not None), so callers that don't pass them
+    (e.g. gym_tradeoff/gym_nle's own env_to_graph, which still return
+    5-tuples) produce byte-for-byte the same JSON as before.
     """
-    return json.dumps(
-    {
+    fields = {
         "node_feats": node_feats,
         "edge_feats": edge_feats,
         "edge_index": edge_index,
         "mask": mask,
         "global_feats": global_feats,
-    },
-    default=json_default,
-)
+    }
+    if wl_colours is not None:
+        fields["wl_colours"] = wl_colours
+    if wl_histogram is not None:
+        fields["wl_histogram"] = wl_histogram
+
+    return json.dumps(fields, default=json_default)

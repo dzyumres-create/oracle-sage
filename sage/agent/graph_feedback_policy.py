@@ -129,19 +129,19 @@ def select_action(actions, projected_values):
     return (th.gather(actions,0,indexes.unsqueeze(0)).squeeze(), values)
 
 class PathValueNet(nn.Module):
-    def __init__(self,layer_norm):
+    def __init__(self,layer_norm,input_dim: int = EMB_SIZE):
         super(PathValueNet, self).__init__()
         self.layer_norm = layer_norm
         if self.layer_norm:
-            self.ln1 = nn.LayerNorm(EMB_SIZE)
-            self.ln2 = nn.LayerNorm(EMB_SIZE)
-        self.path_value_net = nn.Linear(EMB_SIZE*2, 1)
-        
+            self.ln1 = nn.LayerNorm(input_dim)
+            self.ln2 = nn.LayerNorm(input_dim)
+        self.path_value_net = nn.Linear(input_dim*2, 1)
+
     def forward(self,s1,s2):
         if self.layer_norm:
             s1 = self.ln1(s1)
             s2 = self.ln1(s2)
-        return self.path_value_net(th.cat((s1, s2),1))    
+        return self.path_value_net(th.cat((s1, s2),1))
 
 class GNNFeedbackPolicy(GNNPolicy):
     """
@@ -204,6 +204,11 @@ class GNNFeedbackPolicy(GNNPolicy):
         shared_gnn: bool = False,
         layer_norm: bool = False,
     ):
+        # Must be set before super().__init__(): _build_path_value_net()
+        # (called from within that chain's _build(), before optimizer
+        # construction) needs self.layer_norm already present to build
+        # PathValueNet at the correct time.
+        self.layer_norm = layer_norm
 
         self.num_planning_choices = num_planning_choices
         self.shared_gnn = shared_gnn
@@ -238,12 +243,37 @@ class GNNFeedbackPolicy(GNNPolicy):
             optimizer_class,
             optimizer_kwargs,
         )
-        
-        self.path_value_net = PathValueNet(layer_norm)
 
-        if self.shared_gnn:
+    def _build_path_value_net(self) -> None:
+        """
+        Overrides GNNPolicy's no-op default - constructs the discriminator's
+        path-value network. Called from GNNPolicy._build(), before
+        optimizer construction (see _build_value_net's docstring for why
+        this timing matters) - unlike the old post-hoc construction this
+        replaces (self.path_value_net = PathValueNet(layer_norm), formerly
+        here in __init__ after super().__init__() already returned),
+        path_value_net's parameters are now actually captured by
+        self.optimizer.
+        """
+        self.path_value_net = PathValueNet(self.layer_norm)
+
+    def _build_gnn_extractor2(self) -> None:
+        """
+        Overrides GNNPolicy's no-op default - constructs the discriminator's
+        own GNN encoder (or aliases the meta-controller's, if shared_gnn
+        and it's GNN-shaped). Called from GNNPolicy._build(), before
+        optimizer construction - same reasoning and same fix as
+        _build_path_value_net above; this replaces what used to be
+        unconditional code in __init__ after super().__init__() returned.
+        """
+        if self.shared_gnn and isinstance(self.gnn_extractor, GNNExtractor):
             self.gnn_extractor2 = self.gnn_extractor
-        else:            
+        else:
+            # Non-GNN meta-controller encoders (e.g. WLEmbeddingExtractor)
+            # can't share weights with the discriminator's GNN pass - the
+            # discriminator always gets its own independent GNNExtractor
+            # here, regardless of shared_gnn, whenever self.gnn_extractor
+            # isn't itself a GNNExtractor.
             self.gnn_extractor2 = GNNExtractor(
                 edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
             )

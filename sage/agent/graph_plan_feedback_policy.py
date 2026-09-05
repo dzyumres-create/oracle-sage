@@ -35,8 +35,8 @@ from sage.forks.stable_baselines3.stable_baselines3.common.utils import get_line
 from sage.agent.graph_net import MultiMessagePassing
 from sage.domains.utils.spaces import Autoregressive, BinaryAction
 
-from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, EMB_SIZE, GNNPolicy
-from sage.agent.graph_feedback_policy import GNNFeedbackPolicy
+from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, GNNPolicy
+from sage.agent.graph_feedback_policy import GNNFeedbackPolicy, PathValueNet
 
 def segmented_sample(probs, splits, num_samples):
     """
@@ -80,21 +80,6 @@ def select_action(actions, projected_values, plans):
     #max over projected values to get indices, then take those elements from actions.
     values, indexes = th.max(projected_values,1)
     return (th.gather(actions,0,indexes.unsqueeze(0)).squeeze(), values, np.take_along_axis(plans,indexes.unsqueeze(0).cpu().numpy(),0)[0])
-
-class PathValueNet(nn.Module):
-    def __init__(self,layer_norm):
-        super(PathValueNet, self).__init__()
-        self.layer_norm = layer_norm
-        if self.layer_norm:
-            self.ln1 = nn.LayerNorm(EMB_SIZE)
-            self.ln2 = nn.LayerNorm(EMB_SIZE)
-        self.path_value_net = nn.Linear(EMB_SIZE*2, 1)
-        
-    def forward(self,s1,s2):
-        if self.layer_norm:
-            s1 = self.ln1(s1)
-            s2 = self.ln1(s2)
-        return self.path_value_net(th.cat((s1, s2),1))    
 
 class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
     """
@@ -191,6 +176,47 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
             raise ValueError("Invalid action distribution")
         return self._choose_top_action(a,pa,data_starts,entropy,batch, symbolic_batch, eval_action)
 
+    def _encode_current_state(self, symbolic_batch: Batch) -> th.Tensor:
+        """
+        Runs the discriminator's own (GNN) encoder over the raw current
+        state, independently of the meta-controller's encoder - mirrors
+        exactly what's already done for each projected_batch below,
+        applied instead to the untouched raw current state (symbolic_batch
+        - the second return value of extract_features/_get_latent, never
+        overwritten by the meta-controller's encoder). deepcopy is needed
+        because self.features_extractor mutates its input's .x in place,
+        and symbolic_batch is reused elsewhere (project_actions) after
+        this call.
+
+        :param symbolic_batch: the raw, un-embedded current-state batch
+        :return: the discriminator's own current-state global embedding
+        """
+        current_state = self.features_extractor(deepcopy(symbolic_batch))
+        _, current_global = self.gnn_extractor2(
+            current_state.x, current_state.global_features, current_state.edge_attr,
+            current_state.edge_index, current_state.batch,
+        )
+        return current_global
+
+    def _encode_projected_state(self, projected_batch: Batch) -> th.Tensor:
+        """
+        Runs the discriminator's own (GNN) encoder over one projected
+        (post-planner) state - factored out of _choose_top_action so a
+        subclass can override just this, to swap the discriminator's
+        projected-state data source, without touching the surrounding
+        control flow (exploration, logging, action selection) shared by
+        both call sites below.
+
+        :param projected_batch: a single projected-state batch, from project_actions
+        :return: the discriminator's projected-state global embedding
+        """
+        projected_batch = self.features_extractor(projected_batch)
+        _, projected_features = self.gnn_extractor2(
+            projected_batch.x, projected_batch.global_features, projected_batch.edge_attr,
+            projected_batch.edge_index, projected_batch.batch,
+        )
+        return projected_features
+
     def _choose_top_action(self, a,pa,data_starts,entropy, batch, symbolic_batch, eval_action):
         
         k,n = a.shape
@@ -219,10 +245,10 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
                 logger.record_mean("action_selection/prob_choice_2", probs2.mean().item())
                 logger.record_mean("action_selection/prob_choice_3", probs3.mean().item())
 
+                current_global = self._encode_current_state(symbolic_batch)
                 for projected_batch in projected_batches:
-                    projected_batch = self.features_extractor(projected_batch)
-                    _,projected_features = self.gnn_extractor2(projected_batch.x, projected_batch.global_features, projected_batch.edge_attr, projected_batch.edge_index,projected_batch.batch)
-                    projected_values.append(self.path_value_net(batch.global_features, projected_features))
+                    projected_features = self._encode_projected_state(projected_batch)
+                    projected_values.append(self.path_value_net(current_global, projected_features))
                 
                 projected_values = th.cat(projected_values,1)
                 selected_actions,selected_values, selected_plans = select_action(a, projected_values, plans)
@@ -255,9 +281,9 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
         else:
             selected_actions = eval_action.long()            
             projected_batches, _ = project_actions(symbolic_batch, selected_actions.unsqueeze(0),self.observation_space.planner)
-            projected_batch = self.features_extractor(projected_batches[0])
-            _,projected_features = self.gnn_extractor2(projected_batch.x, projected_batch.global_features, projected_batch.edge_attr, projected_batch.edge_index,projected_batch.batch)
-            selected_values = self.path_value_net(batch.global_features, projected_features)
+            projected_features = self._encode_projected_state(projected_batches[0])
+            current_global = self._encode_current_state(symbolic_batch)
+            selected_values = self.path_value_net(current_global, projected_features)
             selected_plans = None
         
 
