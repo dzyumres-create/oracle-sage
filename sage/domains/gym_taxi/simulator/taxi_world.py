@@ -10,7 +10,7 @@ import networkx as nx
 
 from typing import List, NamedTuple
 
-from sage.domains.gym_taxi.utils.representations import env_to_image, env_to_json
+from sage.domains.gym_taxi.utils.representations import env_to_image, env_to_json, env_to_vilg_json
 from sage.domains.gym_taxi.utils.config import MAX_EPISODE_LENGTH
 from sage.domains.gym_taxi.utils.utils import generate_random_walls, generate_city_maze
 
@@ -62,7 +62,8 @@ class TaxiWorldSimulator(object):
         random_walls=True,
         taxi_locations=None,
         rewards=None,
-        planning = False
+        planning = False,
+        graph_convention = "oracle_sage"
     ):
         """
         Houses the game state and transition dynamics for the taxi world.
@@ -84,6 +85,7 @@ class TaxiWorldSimulator(object):
         self.rewards = rewards if rewards is not None else DEFAULT_REWARDS
         self.done = False
         self.planning = planning
+        self.graph_convention = graph_convention
 
         self.graph = self.generate_road_network(random_walls)
 
@@ -91,9 +93,11 @@ class TaxiWorldSimulator(object):
 
         self.passengers = {}
         self.add_passenger()
-        
+
 
     def _get_state_json(self):
+        if self.graph_convention == "vilg":
+            return env_to_vilg_json(self)
         return env_to_json(self)
 
     def act(self, action):
@@ -131,8 +135,16 @@ class TaxiWorldSimulator(object):
             self.taxi = Taxi(self.taxi.node, self.taxi.location, None)
             self.delivery_limit -= 1
             # print(f"seed-id: {self.seed_id}. Time: {self.time} Delivered passenger.")
-            self.graph.remove_node(pid)
-            self.resort_passengers()
+            if self.graph_convention == "vilg":
+                # Keep the passenger node and its destination(pid, dest) edges so the
+                # vILG graph can mark the goal achieved rather than making it vanish --
+                # implementation plan Step 4, option 1. Only the pid<->taxi "in" edges
+                # added back in attempt_pickup are now stale.
+                self.graph.remove_edge(pid, 0)
+                self.graph.remove_edge(0, pid)
+            else:
+                self.graph.remove_node(pid)
+                self.resort_passengers()
             return self.rewards["drop-off"]
         else:
             self.passengers[pid]=passenger

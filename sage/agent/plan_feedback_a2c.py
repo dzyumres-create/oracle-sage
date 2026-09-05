@@ -78,7 +78,7 @@ class PlanFeedback_A2C(Feedback_A2C):
             plan_lengths = np.array([len(p) for p in plans])
             max_plan_length = max(plan_lengths)
             env_finished = plan_lengths == 0
-            plans_grid = -np.ones((len(plan_lengths),max_plan_length),dtype=np.int) #create a grid of plans
+            plans_grid = -np.ones((len(plan_lengths),max_plan_length),dtype=int) #create a grid of plans
             for i,p in enumerate(plans):
                 plans_grid[i,:plan_lengths[i]]=p
             plan_step=0
@@ -114,7 +114,7 @@ class PlanFeedback_A2C(Feedback_A2C):
         with th.no_grad():
             # #Fixing episode timeout - only correct for num-steps = 1
             # true_obs = [[x['s_true']] for x in infos]
-            # true_done = np.array([x['d_true'] for x in infos],dtype=np.bool)
+            # true_done = np.array([x['d_true'] for x in infos],dtype=bool)
             # Compute value for the last timestep
             #obs_tensor = th.as_tensor(new_obs).to(self.device)
             _, values, _, _, _ = self.policy.forward(new_obs)

@@ -302,7 +302,7 @@ class RolloutBuffer(BaseBuffer):
     def reset(self) -> None:
         
         if isinstance(self.observation_space, JsonGraph):
-            self.observations = np.zeros((self.buffer_size, self.n_envs) + self.obs_shape, dtype=np.object)
+            self.observations = np.zeros((self.buffer_size, self.n_envs) + self.obs_shape, dtype=object)
         else:
             self.observations = np.zeros((self.buffer_size, self.n_envs) + self.obs_shape, dtype=np.float32)
         self.actions = np.zeros((self.buffer_size, self.n_envs, self.action_dim), dtype=np.float32)

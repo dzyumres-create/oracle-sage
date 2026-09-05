@@ -142,13 +142,13 @@ def env_to_graph(env,glyph_db,planning = False):
 
 
 
-    node_feats = np.array([v['attr'] for _,v in sorted(graph.nodes.items())],dtype=np.float)
+    node_feats = np.array([v['attr'] for _,v in sorted(graph.nodes.items())],dtype=float)
     edges = nx.to_edgelist(graph)
-    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=np.float)
+    edge_feats = np.array([v['attr'] for (_,_,v) in edges],dtype=float)
     edge_index = np.array([[x,y] for (x,y,_) in edges]).T
 
     if planning == False:
-        mask = np.zeros(len(node_feats),dtype=np.bool)
+        mask = np.zeros(len(node_feats),dtype=bool)
         mask[player_pos]=False
         for x in graph[player_pos]:
             if x > 0:
@@ -156,16 +156,16 @@ def env_to_graph(env,glyph_db,planning = False):
     else:
         if glyph_db.tileset == "minimal": #lava domain
             mask = np.ones(len(node_feats),dtype=np.uint32)
-            mask[np.array(directional,dtype=np.int)]=0 #some items require directions
+            mask[np.array(directional,dtype=int)]=0 #some items require directions
             mask[0]=0 #can't select self
         else: #movement only
-            mask = np.ones(len(node_feats),dtype=np.bool)
+            mask = np.ones(len(node_feats),dtype=bool)
             mask[player_pos]=False #can't do no-op
             mask[0]=False #can't select self
         mask[node_feats.sum(axis=1)==1]=0 # can't select unknown nodes.
 
 
-    global_feats = np.zeros(EMB_SIZE,dtype=np.float)
+    global_feats = np.zeros(EMB_SIZE,dtype=float)
     global_feats[0:25] = env['blstats'][:-1]
 
     return node_feats, edge_feats, edge_index, mask, global_feats

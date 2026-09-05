@@ -1,6 +1,5 @@
 
 from functools import partial
-import itertools
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
 import gym
@@ -66,12 +65,9 @@ def segmented_gather(src, indices, start_indices):
 
 def make_mask(batch):
     device = batch.mask.device
-    data_splits = [sum(1 for _ in g) for _, g in itertools.groupby(batch.batch)]
-    data_splits_tensor = th.tensor(data_splits,device=device)
+    _, data_splits_tensor = th.unique_consecutive(batch.batch, return_counts=True)
+    data_splits = data_splits_tensor.tolist()
     data_starts = get_start_indices(data_splits_tensor)
-
-    # lst_lens = th.tensor([len(x.mask) for x in batch.to_data_list()], device=device)
-    # mask_starts = data_starts.repeat_interleave(lst_lens)
 
     return batch.mask.flatten(), data_splits, data_starts
 

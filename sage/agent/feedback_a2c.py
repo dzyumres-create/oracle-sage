@@ -282,7 +282,7 @@ class Feedback_A2C(A2C):
         with th.no_grad():
             #Fixing episode timeout - only correct for num-steps = 1
             true_obs = [[x['s_true']] for x in infos]
-            true_done = np.array([x['d_true'] for x in infos],dtype=np.bool)
+            true_done = np.array([x['d_true'] for x in infos],dtype=bool)
             # Compute value for the last timestep
             #obs_tensor = th.as_tensor(new_obs).to(self.device)
             _, values, _, _ = self.policy.forward(true_obs)

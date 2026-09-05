@@ -2,6 +2,7 @@
 Run DQN on grid world.
 """
 import sys
+import os
 import argparse
 import torch as th
 
@@ -27,10 +28,18 @@ def run(variant):
 
     info_keywords = ("len100","len200")
 
+    # gnn_global.py is a shared entrypoint (Taxi/Tradeoff/NLE); only Taxi's GraphTaxiEnv
+    # accepts graph_convention, so only pass it through when it's been set away from the
+    # default -- an empty env_kwargs is a no-op for every other env, so this can't affect
+    # any run that isn't explicitly opting into "vilg".
+    env_kwargs = {}
+    if variant["graph_convention"] != "oracle_sage":
+        env_kwargs["graph_convention"] = variant["graph_convention"]
+
     if variant["planner"]:
-        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv)
+        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv,env_kwargs=env_kwargs)
     else:
-        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords})
+        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},env_kwargs=env_kwargs)
 
     if variant["feedback"]:
         if variant["planner"]:
@@ -41,12 +50,20 @@ def run(variant):
         model = A2C(GNNPolicy, env, verbose=variant["verbose"],supported_action_spaces=(spaces.BinaryAction,gym.spaces.Discrete,spaces.Autoregressive),**variant["algorithm_kwargs"])
         
     model.learn(total_timesteps=variant["num_env_steps"],log_interval=variant['log_interval'], callback=TensorboardCallback(variant["verbose"]))
-    #model.save(variant["save_dir"])
+    os.makedirs(variant["save_dir"], exist_ok=True)
+    model.save(variant["save_dir"] + "/final_model")
 
 def main(arglist):
     parser = argparse.ArgumentParser(description=None)
     parser.add_argument(
         "--env-name", default="Boxworld-v0", help="Select the environment to run"
+    )
+    parser.add_argument(
+        "--graph-convention",
+        type=str,
+        default="oracle_sage",
+        choices=["oracle_sage", "vilg"],
+        help="graph construction convention for Taxi's graph observations (default: oracle_sage)",
     )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
@@ -220,6 +237,7 @@ def main(arglist):
         algorithm="A2C",
         version="normal",
         env_name=args.env_name,
+        graph_convention=args.graph_convention,
         seed=args.seed,
         num_env_steps=args.num_env_steps,
         num_processes=args.num_processes,
