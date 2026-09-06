@@ -76,6 +76,81 @@ def initial_colours(x: th.Tensor) -> th.Tensor:
     return th.argmax(x, dim=1).long()
 
 
+def initial_colours_vilg(x: th.Tensor) -> th.Tensor:
+    """
+    Assigns each node its initial WL colour from vILG's 9-column node
+    features (see env_to_vilg_graph, sage/domains/gym_taxi/utils/
+    representations.py): columns 0-2 are an object-type one-hot (location/
+    taxi/passenger), columns 3-5 are a predicate one-hot (adjacent/in/
+    destination), columns 6-8 are a goal-status one-hot (achieved_goal/
+    unachieved_goal/achieved_nongoal). Object nodes zero out columns 3-8;
+    proposition nodes zero out columns 0-2 and always have exactly one "1"
+    in each of the predicate and status blocks - i.e. a proposition node's
+    row legitimately has TWO active columns at once, unlike `initial_colours`'
+    plain one-hot.
+
+    A blind `argmax(x, dim=1)` over the full 9-column vector - the
+    behaviour this function replaces - always resolves to whichever active
+    column has the lower index, which is always the predicate block (3-5)
+    over the status block (6-8). That silently discards goal status:
+    destination(p,l) achieved and destination(p,l) unachieved would collapse
+    to the identical initial colour, and stay indistinguishable through
+    every later `refine()` iteration, since `refine()` can only combine
+    colours that already exist and cannot recover information this function
+    already discarded.
+
+    Instead, object and proposition nodes are decoded separately:
+      - object nodes: colour = argmax(x[:, 0:3])  (0=location, 1=taxi,
+        2=passenger) - same 0/1/2 id space `initial_colours` uses.
+      - proposition nodes: colour = 3 + pred_id * 3 + status_id, where
+        pred_id = argmax(x[:, 3:6]) and status_id = argmax(x[:, 6:9]) - a
+        joint (predicate, status) id, offset past the 3 object-type ids so
+        the two blocks never collide (GOOSE's Def 3.1 Fcat: one colour per
+        (predicate, argument-status) combination).
+
+    Worked example (see env_to_vilg_graph for the exact row construction):
+        adjacent, achieved_nongoal:       pred_id=0, status_id=2 -> colour = 3+0*3+2 = 5
+        destination(p,l), achieved:       pred_id=2, status_id=0 -> colour = 3+2*3+0 = 9
+        destination(p,l), unachieved:     pred_id=2, status_id=1 -> colour = 3+2*3+1 = 10
+    So an achieved and an unachieved destination proposition - identical in
+    every other respect - now get distinct colours (9 vs 10), where the old
+    whole-vector argmax gave both colour 3 (the predicate block's
+    "destination" index) regardless of status.
+
+    :param x: node features, shape [N, 9], see column layout above
+    :return: initial colour per node, shape [N], dtype long. Values are in
+        {0, ..., 11} (3 object-type ids, 9 = 3 predicates x 3 statuses
+        proposition ids) - a small, local id space, distinct from (and not
+        looked up in) `vocab`; see `wl_colours` for how it is folded into
+        the shared vocab id space.
+    """
+    is_object = x[:, 0:3].any(dim=1)
+    obj_type = x[:, 0:3].argmax(dim=1)
+    pred_id = x[:, 3:6].argmax(dim=1)
+    status_id = x[:, 6:9].argmax(dim=1)
+    prop_colour = 3 + pred_id * 3 + status_id
+    return th.where(is_object, obj_type, prop_colour).long()
+
+
+def edge_labels_vilg(edge_attr: th.Tensor) -> th.Tensor:
+    """
+    Combines vILG's edge argument-position into a categorical edge label.
+
+    edge_attr columns are [position_1, position_2], a one-hot with no
+    direction bit: unlike Oracle-SAGE's edges (always materialised as a
+    forward/backward pair over the same object-object connection), vILG
+    edges (see env_to_vilg_graph) only ever run proposition -> object, in
+    one direction, so there is no reverse duplicate to disambiguate with a
+    sign bit - the position one-hot alone is already unambiguous.
+
+    :param edge_attr: edge attributes, shape [E, 2]
+    :return: label per edge, shape [E], dtype long, values in {0, 1}
+        (0 = position 1 / the proposition's "subject" argument, 1 =
+        position 2 / the proposition's "value" argument)
+    """
+    return th.argmax(edge_attr, dim=1).long()
+
+
 def edge_labels(edge_attr: th.Tensor) -> th.Tensor:
     """
     Combines edge type and direction into a single categorical edge label.
@@ -167,10 +242,23 @@ def wl_colours(
     num_iterations: int = 5,
     vocab: Dict[Hashable, int] = None,
     frozen: bool = False,
+    graph_convention: str = "oracle_sage",
 ) -> Tuple[th.Tensor, th.Tensor]:
     """
     Runs WL colour refinement for `num_iterations` steps and returns the
     final per-node colours plus a histogram over the (shared) colour vocab.
+
+    `graph_convention` selects which (initial_colours, edge_labels) decoder
+    pair to use - "oracle_sage" (default, unchanged) uses `initial_colours`/
+    `edge_labels`; "vilg" uses `initial_colours_vilg`/`edge_labels_vilg`
+    instead, since vILG's node/edge feature layout (see env_to_vilg_graph,
+    sage/domains/gym_taxi/utils/representations.py) is shaped differently
+    from Oracle-SAGE's. This is threaded through explicitly by the caller
+    (which already knows its own graph_convention - see
+    sage/domains/gym_taxi/utils/representations.py and sage/domains/
+    gym_taxi/simulator/planner.py) rather than auto-detected from tensor
+    width, since auto-detection by shape is fragile and could silently
+    misfire if the two conventions' dimensions ever coincide.
 
     The raw type ids from `initial_colours` are first mapped into the same
     shared `vocab` id space used by `refine` (under a signature tagged
@@ -192,9 +280,12 @@ def wl_colours(
     any number of frozen calls sharing that vocab, which is what makes it
     safe to feed as fixed-size input to a neural net layer.
 
-    :param x: node features, shape [N, 3], see `initial_colours`
+    :param x: node features - shape [N, 3] for "oracle_sage" (see
+        `initial_colours`), shape [N, 9] for "vilg" (see
+        `initial_colours_vilg`)
     :param edge_index: edge index, shape [2, E]
-    :param edge_attr: edge attributes, shape [E, 4], see `edge_labels`
+    :param edge_attr: edge attributes - shape [E, 4] for "oracle_sage" (see
+        `edge_labels`), shape [E, 2] for "vilg" (see `edge_labels_vilg`)
     :param num_iterations: number of refinement iterations, L (default 5)
     :param vocab: signature -> colour id, mutated in place (unless
         `frozen`) and shared across calls so that colour ids remain stable
@@ -202,24 +293,38 @@ def wl_colours(
     :param frozen: if True, treat `vocab` as read-only (see above).
         Requires `freeze_vocab(vocab)` to have been called first - raises
         ValueError otherwise.
+    :param graph_convention: "oracle_sage" (default) or "vilg" - selects
+        the decoder pair, see above.
     :return: (colours, histogram)
         colours: final per-node colour id, shape [N], dtype long
         histogram: count of nodes with colour id i, shape [len(vocab)]
             after this call, dtype float, zero for ids not present in this
             graph
     """
+    if graph_convention not in ("oracle_sage", "vilg"):
+        raise ValueError(
+            f'wl_colours() got graph_convention={graph_convention!r}; expected '
+            f'"oracle_sage" or "vilg".'
+        )
+
     if vocab is None:
         vocab = {}
 
     _check_frozen_vocab(vocab, frozen, "wl_colours")
 
-    type_colours = initial_colours(x).tolist()
+    if graph_convention == "vilg":
+        type_colours = initial_colours_vilg(x).tolist()
+    else:
+        type_colours = initial_colours(x).tolist()
     colours = th.empty(x.shape[0], dtype=th.long, device=x.device)
     for v, type_id in enumerate(type_colours):
         signature = ("init", type_id)
         colours[v] = _resolve(signature, vocab, frozen)
 
-    labels = edge_labels(edge_attr)
+    if graph_convention == "vilg":
+        labels = edge_labels_vilg(edge_attr)
+    else:
+        labels = edge_labels(edge_attr)
     for _ in range(num_iterations):
         colours = refine(colours, edge_index, labels, vocab, frozen=frozen)
 

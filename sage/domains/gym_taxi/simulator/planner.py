@@ -49,29 +49,24 @@ class Planner:
         if actions == []:
             actions = [state.taxi.location]
 
-        if self.graph_convention == "oracle_sage":
-            # WL colours on the final, fully-mutated projection - mirrors
-            # env_to_graph's current wiring exactly (sage/domains/gym_taxi/
-            # utils/representations.py), so a projected graph carries
-            # wl_colours/wl_histogram in the same shapes/convention as a
-            # live-state graph. projection.x/edge_index/edge_attr are already
-            # torch tensors here (no numpy round-trip needed, unlike
-            # env_to_graph). frozen=True: unseen signatures resolve to OOV
-            # rather than growing the vocab at runtime.
-            wl_colour_ids, wl_histogram = wl_colours(
-                projection.x, projection.edge_index, projection.edge_attr,
-                num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
-            )
-            projection.wl_colours = wl_colour_ids
-            projection.wl_histogram = wl_histogram.unsqueeze(0)
-        else:
-            raise NotImplementedError(
-                "WL colour computation in Planner.plan() does not yet support the 'vilg' "
-                "graph convention — initial_colours/edge_labels in wl_colours.py are still "
-                "hardcoded to Oracle-SAGE's 3/4-column layout. This is pending a design "
-                "decision on how vilg's goal-status encoding should be represented in WL's "
-                "initial colouring (Cell 4 work, not yet done)."
-            )
+        # WL colours on the final, fully-mutated projection - mirrors
+        # env_to_graph's current wiring exactly (sage/domains/gym_taxi/
+        # utils/representations.py), so a projected graph carries
+        # wl_colours/wl_histogram in the same shapes/convention as a
+        # live-state graph. projection.x/edge_index/edge_attr are already
+        # torch tensors here (no numpy round-trip needed, unlike
+        # env_to_graph). frozen=True: unseen signatures resolve to OOV
+        # rather than growing the vocab at runtime. graph_convention is
+        # threaded through explicitly so wl_colours() dispatches to the
+        # matching (initial_colours, edge_labels) decoder pair for
+        # whichever convention this Planner was constructed with.
+        wl_colour_ids, wl_histogram = wl_colours(
+            projection.x, projection.edge_index, projection.edge_attr,
+            num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
+            graph_convention=self.graph_convention,
+        )
+        projection.wl_colours = wl_colour_ids
+        projection.wl_histogram = wl_histogram.unsqueeze(0)
 
         return increment_timer(projection,actions)
 

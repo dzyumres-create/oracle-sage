@@ -80,6 +80,7 @@ def env_to_graph(env):
     wl_colour_ids, wl_histogram = wl_colours(
         _x, _edge_index, _edge_attr,
         num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
+        graph_convention="oracle_sage",
     )
 
     return node_feats, edge_feats, edge_index, mask, global_feats, wl_colour_ids.tolist(), wl_histogram.tolist()
