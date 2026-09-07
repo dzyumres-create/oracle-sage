@@ -209,15 +209,29 @@ def graph_to_networkx_vilg(graph):
 
 
 def move_taxi_vilg(graph, taxi, node):
-    """Redirects the taxi's single "in" proposition's position-2 edge from its old
-    location to the new one. Under vilg there is only one such proposition (the reverse
-    direction that oracle_sage keeps for message-passing symmetry is never materialised
-    as its own node -- see env_to_vilg_graph), so unlike move_taxi this only ever needs
-    to update one edge, not a forward/backward pair."""
+    """Redirects the taxi's "in" proposition's position-2 edge PAIR - both forward
+    (prop_idx -> location) and reverse (location -> prop_idx) - from its old location
+    to the new one. Since env_to_vilg_graph materialises every proposition-argument
+    connection as a forward/backward pair (matching the vILG paper's undirected edge
+    definition), both directions need updating here too, not just the forward one.
+    The proposition's position-1 edge pair (prop_idx <-> taxi) is unaffected, since
+    only the location argument changes on a move, not the taxi argument.
+
+    All masks (and the pre-move location) are computed up front, before any mutation
+    of graph.edge_index, so the reverse-edge mask is never derived from an
+    already-mutated tensor."""
     pos1 = graph.edge_attr[:, 0] == 1
     prop_idx = graph.edge_index[0, th.logical_and(pos1, graph.edge_index[1] == taxi)][0]
     pos2 = graph.edge_attr[:, 1] == 1
-    graph.edge_index[1, th.logical_and(pos2, graph.edge_index[0] == prop_idx)] = node
+
+    forward_mask = th.logical_and(pos2, graph.edge_index[0] == prop_idx)
+    old_location = graph.edge_index[1, forward_mask][0]
+    reverse_mask = th.logical_and(
+        pos2, th.logical_and(graph.edge_index[1] == prop_idx, graph.edge_index[0] == old_location)
+    )
+
+    graph.edge_index[1, forward_mask] = node
+    graph.edge_index[0, reverse_mask] = node
 
 
 def remove_node_from_graph_vilg(graph, node):

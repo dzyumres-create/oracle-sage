@@ -101,8 +101,9 @@ def env_to_vilg_graph(env):
     """
     Converts taxi world state from env to a vILG graph (Chen & Thiebaux, Def 3.1): every
     grounded proposition currently true in the state gets its own node, connected by
-    position-labeled edges to the object nodes that are its arguments, in addition to the
-    object nodes themselves.
+    position-labeled UNDIRECTED edges (materialised as a forward/backward pair, per the
+    paper's <u,v> = <v,u> and matching Oracle-SAGE's own edge-pairing convention) to the
+    object nodes that are its arguments, in addition to the object nodes themselves.
 
     Node features pad the object one-hot (3) and the predicate/status one-hots (3 + 3) out
     to a shared 9-dim vector, since object nodes and proposition nodes use disjoint feature
@@ -153,6 +154,14 @@ def env_to_vilg_graph(env):
 
         edges.append((next_idx, obj_index[u], 1))
         edges.append((next_idx, obj_index[v], 2))
+        # mirrored reverse edges: per the vILG paper (Chen & Thiebaux, Def 3.1),
+        # edges are UNDIRECTED (<u,v> = <v,u>), matching Oracle-SAGE's own
+        # convention of materialising every logical connection as a
+        # forward/backward pair. Position labels are direction-independent
+        # (defined on the undirected edge itself), so the reverse edge reuses
+        # the same label as its forward counterpart, not a new one.
+        edges.append((obj_index[u], next_idx, 1))
+        edges.append((obj_index[v], next_idx, 2))
         next_idx += 1
 
     node_feats = np.array(node_feats, dtype=np.float64)
