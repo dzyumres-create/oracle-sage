@@ -158,6 +158,7 @@ class TaxiWorldSimulator(object):
             self.taxi = Taxi(self.taxi.node, self.taxi.location, pid)
             self.passengers[pid] = Passenger(self.taxi.node, passenger.destination)
             self.graph.remove_edge(pid,passenger.location)
+            self.graph.remove_edge(passenger.location,pid)
             self.graph.add_edge(pid, 0, attr=[0,1,0,1])
             self.graph.add_edge(0, pid, attr=[0,1,0,-1])
             return self.rewards["base"]
@@ -170,6 +171,7 @@ class TaxiWorldSimulator(object):
         elif self.graph.edges[(start,action)]['attr']==[1,0,0,1]:
             self.taxi = Taxi(self.taxi.node, action, self.taxi.passenger)
             self.graph.remove_edge(0,start)
+            self.graph.remove_edge(start,0)
             self.graph.add_edge(0, action, attr=[0,1,0,1])
             self.graph.add_edge(action, 0, attr=[0,1,0,-1])
         return self.rewards["base"]
