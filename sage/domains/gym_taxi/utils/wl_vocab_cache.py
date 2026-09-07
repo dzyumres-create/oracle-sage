@@ -7,11 +7,22 @@
    HARDCODED to one specific, already-validated frozen vocab: built from
    scenario="city" (Oracle-SAGE's real Taxi training env, city-taxi-unmasked-v1)
    at L=1, from 18,000 sampled graphs (see sage/domains/utils/build_wl_vocab.py),
-   with 0% held-out OOV measured over 121k+ fresh nodes. WL_VOCAB_PATH and
-   NUM_ITERATIONS below are two halves of the same fact - a vocab's colour
-   ids are only meaningful for the exact L it was built/frozen with - so if
-   a different scenario/L vocab is ever adopted for production use, BOTH
-   constants must be updated together.
+   with 0% held-out OOV measured over 121,148 fresh nodes (disjoint seed).
+   WL_VOCAB_PATH and NUM_ITERATIONS below are two halves of the same fact -
+   a vocab's colour ids are only meaningful for the exact L it was
+   built/frozen with - so if a different scenario/L vocab is ever adopted
+   for production use, BOTH constants must be updated together.
+
+   Rebuilt (this file, wl_vocab_taxi_city_L1_edgefixed.json) after fixing a
+   real bug in TaxiWorldSimulator.attempt_move/attempt_pickup (taxi_world.py)
+   that left stale one-directional tether edges in the graph, which had been
+   silently collapsing some genuinely distinct situations onto the same WL
+   colour. The prior vocab (wl_vocab_taxi_city_L1.json, 47 colours incl. OOV,
+   built from graphs sampled before that fix) is kept on disk for reference/
+   comparison only - this module no longer points at it. The rebuilt vocab
+   is 3 colours larger (50 incl. OOV) at the same sample size and depth,
+   consistent with the fix correctly separating those previously-collided
+   situations rather than indicating any change in L or methodology.
 
    The vocab is loaded from disk ONCE per process and cached (`lru_cache`):
    this matters because env_to_graph runs on every environment step,
@@ -37,7 +48,7 @@ from sage.domains.utils.wl_colours import OOV_SIGNATURE
 
 # Tied together - see module docstring. Change both if a different
 # scenario/L vocab is ever adopted.
-WL_VOCAB_PATH = Path(__file__).resolve().parents[2] / "utils" / "wl_vocab_taxi_city_L1.json"
+WL_VOCAB_PATH = Path(__file__).resolve().parents[2] / "utils" / "wl_vocab_taxi_city_L1_edgefixed.json"
 NUM_ITERATIONS = 1
 
 
