@@ -4,8 +4,8 @@ Taxi meta-controller with a WL-colour embedding encoder in place of the GNN
 message-passing encoder, while the discriminator stays fully GNN.
 
 Uses scenario="city" (Oracle-SAGE's real Taxi training env), matching the
-frozen vocab (sage/domains/utils/wl_vocab_taxi_city_L1.json) WLPlanFeedbackPolicy
-defaults to.
+frozen vocab (see sage/domains/gym_taxi/utils/wl_vocab_cache.py:WL_VOCAB_PATH)
+WLPlanFeedbackPolicy defaults to.
 
 Run from the repo root with:
     python -m unittest tests.test_wl_plan_feedback_policy -v
@@ -80,8 +80,12 @@ class TestWLPlanFeedbackPolicyConstruction(unittest.TestCase):
         self.assertIsInstance(policy.gnn_extractor2, GNNExtractor)
         self.assertIsNot(policy.gnn_extractor2, policy.gnn_extractor)
 
-        # default wl_vocab_path points at the validated frozen vocab
-        self.assertTrue(policy.wl_vocab_path.endswith("wl_vocab_taxi_city_L1.json"))
+        # default wl_vocab_path points at whatever wl_vocab_cache.WL_VOCAB_PATH
+        # currently designates as the validated frozen vocab (single source
+        # of truth - see wl_vocab_cache.py's module docstring), not a
+        # hardcoded filename that would drift whenever the vocab is rebuilt.
+        from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH
+        self.assertEqual(policy.wl_vocab_path, str(WL_VOCAB_PATH))
 
     def test_shared_gnn_true_no_longer_aliases_a_non_gnn_meta_controller(self):
         """
