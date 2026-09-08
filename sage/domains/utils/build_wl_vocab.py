@@ -154,7 +154,7 @@ import torch as th
 import sage.domains.gym_taxi  # noqa: F401  (registers the gym env ids)
 from sage.domains.gym_taxi import REWARDS
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
-from sage.domains.gym_taxi.utils.representations import env_to_graph
+from sage.domains.gym_taxi.utils.representations import env_to_graph, env_to_vilg_graph
 from sage.domains.utils.wl_colours import OOV_SIGNATURE, freeze_vocab, wl_colours
 
 # The exact config behind Oracle-SAGE's real Taxi training env-name,
@@ -177,8 +177,35 @@ REWARDS_VARIANT = REWARDS["v1"]
 NUM_ITERATIONS = 5
 
 
-def default_out_path(scenario, num_iterations):
-    return Path(__file__).parent / f"wl_vocab_taxi_{scenario}_L{num_iterations}.json"
+def default_out_path(scenario, num_iterations, graph_convention="oracle_sage"):
+    # oracle_sage keeps the original, unsuffixed filename exactly - only a
+    # non-default convention gets a suffix, so existing oracle_sage vocab
+    # filenames/paths are completely unaffected by this generalization.
+    suffix = "" if graph_convention == "oracle_sage" else f"_{graph_convention}"
+    return Path(__file__).parent / f"wl_vocab_taxi_{scenario}{suffix}_L{num_iterations}.json"
+
+
+def extract_graph_tensors(sim, graph_convention="oracle_sage"):
+    """
+    Reads a live sim's current graph as (x, edge_index, edge_attr) torch
+    tensors, via whichever translator matches `graph_convention`:
+    env_to_graph (oracle_sage, 7-tuple - trailing wl_colours/wl_histogram
+    discarded here since this module recomputes wl_colours itself, in
+    growing mode, below) or env_to_vilg_graph (vilg, plain 5-tuple, no WL
+    fields at all - see representations.py).
+
+    :param sim: a TaxiWorldSimulator instance (env.sim)
+    :param graph_convention: "oracle_sage" (default) or "vilg"
+    :return: (x, edge_index, edge_attr) torch tensors
+    """
+    if graph_convention == "vilg":
+        node_feats, edge_feats, edge_index_np, _, _ = env_to_vilg_graph(sim)
+    else:
+        node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_graph(sim)
+    x = th.as_tensor(node_feats, dtype=th.float)
+    edge_attr = th.as_tensor(edge_feats, dtype=th.float)
+    edge_index = th.as_tensor(edge_index_np, dtype=th.long)
+    return x, edge_index, edge_attr
 
 
 def sample_action(sim):
@@ -191,17 +218,32 @@ def sample_action(sim):
     passenger node (a pickup attempt - always safe). See "Investigation
     notes" above for why non-adjacent location actions are avoided.
 
+    Under graph_convention="vilg", a delivered passenger's node (and its
+    destination(pid, dest) edge) deliberately survives in sim.graph purely
+    to carry goal status (see env_to_vilg_graph/attempt_dropoff's "vilg"
+    branch) - so it can still turn up as a successor of whatever location is
+    its destination, even though it's no longer in sim.passengers and
+    attempt_pickup would KeyError on it. Excluded the same way the real
+    action mask already does (env_to_vilg_graph's `selectable` list:
+    "(not is_passenger) or (nid in env.passengers)") - this can never fire
+    under oracle_sage, since a delivered passenger's node is removed from
+    the graph entirely there (attempt_dropoff's non-vilg branch), not kept
+    alive, so this check is a no-op for that convention.
+
     :param sim: a TaxiWorldSimulator instance (env.sim)
     :return: a valid node id to pass to env.step()
     """
     taxi_location = sim.taxi.location
-    candidates = set(sim.graph.successors(taxi_location))
+    candidates = {
+        c for c in sim.graph.successors(taxi_location)
+        if sim.graph.nodes[c]["attr"] != [0, 0, 1] or c in sim.passengers
+    }
     candidates.add(taxi_location)
     candidates.add(0)  # taxi's own node -> dropoff attempt
     return int(np.random.choice(list(candidates)))
 
 
-def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATIONS, seed=0, log_every=100, scenario=SCENARIO):
+def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATIONS, seed=0, log_every=100, scenario=SCENARIO, graph_convention="oracle_sage"):
     """
     Resets/steps through the Taxi environment (see MASK/REWARDS_VARIANT
     above, and `scenario` below), running growing-mode wl_colours on the
@@ -218,28 +260,25 @@ def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATI
     :param scenario: `GraphTaxiEnv` scenario key (default SCENARIO="city",
         the real training config - see module docstring for why other
         values might be used for a diagnostic comparison)
+    :param graph_convention: "oracle_sage" (default, unchanged behaviour) or
+        "vilg" - selects both the GraphTaxiEnv construction and the
+        translator/wl_colours decoder pair to use throughout.
     :return: total number of graphs sampled (and folded into `vocab`)
     """
     np.random.seed(seed)
     total_graphs = 0
     last_checkpoint_size = len(vocab)
 
-    env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT)
+    env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT, graph_convention=graph_convention)
     for _ in range(episodes):
         env.reset()
         for _ in range(steps_per_episode):
-            # env_to_graph now also returns wl_colours/wl_histogram (this
-            # script's own WL wiring is unrelated - it recomputes wl_colours
-            # itself, in growing mode, below - so those two extra values are
-            # discarded here).
-            node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_graph(env.sim)
-            x = th.as_tensor(node_feats, dtype=th.float)
-            edge_attr = th.as_tensor(edge_feats, dtype=th.float)
-            edge_index = th.as_tensor(edge_index_np, dtype=th.long)
+            x, edge_index, edge_attr = extract_graph_tensors(env.sim, graph_convention=graph_convention)
 
             wl_colours(
                 x, edge_index, edge_attr,
                 num_iterations=num_iterations, vocab=vocab, frozen=False,
+                graph_convention=graph_convention,
             )
             total_graphs += 1
 
@@ -325,10 +364,18 @@ def main():
     parser.add_argument(
         "--out", default=None,
         help="output path for the frozen vocab JSON "
-             "(default: wl_vocab_taxi_{scenario}_L{num_iterations}.json alongside this script)",
+             "(default: wl_vocab_taxi_{scenario}_L{num_iterations}.json alongside this script, "
+             "or wl_vocab_taxi_{scenario}_{graph_convention}_L{num_iterations}.json for a "
+             "non-oracle_sage --graph-convention)",
+    )
+    parser.add_argument(
+        "--graph-convention", default="oracle_sage", choices=["oracle_sage", "vilg"],
+        help="graph construction convention to sample from (default: oracle_sage, unchanged "
+             "behaviour). 'vilg' constructs GraphTaxiEnv(graph_convention='vilg') and reads "
+             "graphs via env_to_vilg_graph instead of env_to_graph.",
     )
     args = parser.parse_args()
-    out_path = args.out if args.out is not None else str(default_out_path(args.scenario, args.num_iterations))
+    out_path = args.out if args.out is not None else str(default_out_path(args.scenario, args.num_iterations, args.graph_convention))
 
     start = time.time()
     vocab = {}
@@ -340,12 +387,13 @@ def main():
         seed=args.seed,
         log_every=args.log_every,
         scenario=args.scenario,
+        graph_convention=args.graph_convention,
     )
     vocab_size = freeze_vocab(vocab)
     save_vocab(vocab, out_path)
     elapsed = time.time() - start
 
-    print(f"sampled {total_graphs} graphs from scenario={args.scenario!r} "
+    print(f"sampled {total_graphs} graphs from scenario={args.scenario!r} graph_convention={args.graph_convention!r} "
           f"({args.episodes} episodes x {args.steps_per_episode} steps each), L={args.num_iterations}")
     print(f"vocab_size (frozen, includes OOV) = {vocab_size}")
     print(f"wrote {out_path}")
