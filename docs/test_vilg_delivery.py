@@ -62,7 +62,7 @@ assert env.taxi.location == 6
 assert (pid, passenger0.location, passenger0.destination) == (10, 3, 9)
 
 # --- before delivery -----------------------------------------------------------------
-nf0, ef0, ei0, mask0, gf0 = env_to_vilg_graph(env)
+nf0, ef0, ei0, mask0, gf0, _, _ = env_to_vilg_graph(env)
 prop_idx0 = find_destination_prop(nf0)
 assert list(nf0[prop_idx0][6:9]) == UNACHIEVED_GOAL
 node_count_start = nf0.shape[0]
@@ -74,7 +74,7 @@ env.act(pid)  # pickup
 env.act(MOVE_TO_DEST_A)
 env.act(MOVE_TO_DEST_B)
 
-nf_pre, ef_pre, ei_pre, mask_pre, gf_pre = env_to_vilg_graph(env)
+nf_pre, ef_pre, ei_pre, mask_pre, gf_pre, _, _ = env_to_vilg_graph(env)
 prop_idx_pre = find_destination_prop(nf_pre)
 assert list(nf_pre[prop_idx_pre][6:9]) == UNACHIEVED_GOAL
 node_count_pre_dropoff = nf_pre.shape[0]
@@ -86,7 +86,7 @@ assert reward == env.rewards["drop-off"]
 assert pid not in env.passengers, "FAIL: passenger must still be popped from env.passengers on delivery"
 
 # --- after delivery -------------------------------------------------------------------
-nf1, ef1, ei1, mask1, gf1 = env_to_vilg_graph(env)
+nf1, ef1, ei1, mask1, gf1, _, _ = env_to_vilg_graph(env)
 node_count_after_dropoff = nf1.shape[0]
 
 prop_idx1 = find_destination_prop(nf1)

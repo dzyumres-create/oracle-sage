@@ -77,7 +77,7 @@ def check_state(step, node_feats, edge_feats, edge_index, mask, global_feats, de
 
 
 try:
-    nf, ef, ei, mask, gf = env_to_vilg_graph(env)
+    nf, ef, ei, mask, gf, _, _ = env_to_vilg_graph(env)
     check_state(-1, nf, ef, ei, mask, gf, delivered_count)
     print(f"step -1 (initial state): {nf.shape[0]} nodes, {ei.shape[1]} edges, mask True count {mask.sum()}")
 
@@ -91,7 +91,7 @@ try:
         if reward == env.rewards["drop-off"]:
             delivered_count += 1
 
-        nf, ef, ei, mask, gf = env_to_vilg_graph(env)
+        nf, ef, ei, mask, gf, _, _ = env_to_vilg_graph(env)
         check_state(step, nf, ef, ei, mask, gf, delivered_count)
         last_ok_step = step
 

@@ -18,7 +18,7 @@ import json
 import numpy as np
 import torch as th
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
-from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, NUM_ITERATIONS as WL_NUM_ITERATIONS
+from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations
 from sage.domains.utils.representations import graph_to_json, EMB_SIZE
 from sage.domains.utils.wl_colours import wl_colours
 import networkx as nx
@@ -79,7 +79,7 @@ def env_to_graph(env):
     _edge_attr = th.as_tensor(edge_feats, dtype=th.float)
     wl_colour_ids, wl_histogram = wl_colours(
         _x, _edge_index, _edge_attr,
-        num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
+        num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
         graph_convention="oracle_sage",
     )
 
@@ -117,7 +117,7 @@ def env_to_vilg_graph(env):
     are tagged achieved_propositional_nongoal, since Taxi has no other goal predicates.
 
     :param env: taxi world state in env format
-    :return: node_feats, edge_feats, edge_index, mask, global_feats
+    :return: node_feats, edge_feats, edge_index, mask, global_feats, wl_colours, wl_histogram
     """
     node_feats = []
     node_kind = []  # parallel list: True = object node, False = proposition node
@@ -184,7 +184,24 @@ def env_to_vilg_graph(env):
     global_feats = np.zeros(EMB_SIZE, dtype=np.float64)
     global_feats[0] = (env.timeout - env.time) / env.timeout
 
-    return node_feats, edge_feats, edge_index, mask, global_feats
+    # WL colours (mirrors env_to_graph's wiring exactly - see
+    # sage/domains/gym_taxi/utils/wl_vocab_cache.py: frozen=True means unseen
+    # signatures resolve to OOV rather than growing the vocab at runtime).
+    # Unlike oracle_sage, vilg's correct vocab/L is NOT wl_vocab_cache's
+    # default - it must be configured via configure_wl_vocab_override(path,
+    # num_iterations) before this runs, or get_wl_vocab()/
+    # get_wl_num_iterations() silently fall back to oracle_sage's L=1 vocab,
+    # which is nonsensical (but not a crash) for vilg-shaped graphs.
+    _x = th.as_tensor(node_feats, dtype=th.float)
+    _edge_index = th.as_tensor(edge_index, dtype=th.long)
+    _edge_attr = th.as_tensor(edge_feats, dtype=th.float)
+    wl_colour_ids, wl_histogram = wl_colours(
+        _x, _edge_index, _edge_attr,
+        num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
+        graph_convention="vilg",
+    )
+
+    return node_feats, edge_feats, edge_index, mask, global_feats, wl_colour_ids.tolist(), wl_histogram.tolist()
 
 
 

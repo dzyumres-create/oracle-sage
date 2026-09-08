@@ -189,17 +189,17 @@ def extract_graph_tensors(sim, graph_convention="oracle_sage"):
     """
     Reads a live sim's current graph as (x, edge_index, edge_attr) torch
     tensors, via whichever translator matches `graph_convention`:
-    env_to_graph (oracle_sage, 7-tuple - trailing wl_colours/wl_histogram
-    discarded here since this module recomputes wl_colours itself, in
-    growing mode, below) or env_to_vilg_graph (vilg, plain 5-tuple, no WL
-    fields at all - see representations.py).
+    env_to_graph (oracle_sage) or env_to_vilg_graph (vilg) - both now return
+    a 7-tuple with trailing wl_colours/wl_histogram fields (see
+    representations.py), discarded here either way since this module
+    recomputes wl_colours itself, in growing mode, below.
 
     :param sim: a TaxiWorldSimulator instance (env.sim)
     :param graph_convention: "oracle_sage" (default) or "vilg"
     :return: (x, edge_index, edge_attr) torch tensors
     """
     if graph_convention == "vilg":
-        node_feats, edge_feats, edge_index_np, _, _ = env_to_vilg_graph(sim)
+        node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_vilg_graph(sim)
     else:
         node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_graph(sim)
     x = th.as_tensor(node_feats, dtype=th.float)

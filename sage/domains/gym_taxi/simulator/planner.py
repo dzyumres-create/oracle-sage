@@ -5,7 +5,7 @@ import networkx as nx
 
 from typing import List, NamedTuple
 
-from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, NUM_ITERATIONS as WL_NUM_ITERATIONS
+from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations
 from sage.domains.utils.wl_colours import wl_colours
 
 
@@ -60,9 +60,14 @@ class Planner:
         # threaded through explicitly so wl_colours() dispatches to the
         # matching (initial_colours, edge_labels) decoder pair for
         # whichever convention this Planner was constructed with.
+        # get_wl_vocab()/get_wl_num_iterations() read whichever vocab+L is
+        # currently active (the oracle_sage default, or an override set via
+        # wl_vocab_cache.configure_wl_vocab_override() - see that module's
+        # docstring) - called fresh here each time, not bound once at import,
+        # so a later override is always picked up.
         wl_colour_ids, wl_histogram = wl_colours(
             projection.x, projection.edge_index, projection.edge_attr,
-            num_iterations=WL_NUM_ITERATIONS, vocab=get_wl_vocab(), frozen=True,
+            num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
             graph_convention=self.graph_convention,
         )
         projection.wl_colours = wl_colour_ids

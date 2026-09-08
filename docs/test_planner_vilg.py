@@ -22,7 +22,7 @@ from sage.domains.gym_taxi.simulator.planner import (
 
 
 def build_data(env):
-    nf, ef, ei, mask, gf = env_to_vilg_graph(env)
+    nf, ef, ei, mask, gf, _, _ = env_to_vilg_graph(env)
     data = Data(
         x=th.as_tensor(nf),
         edge_index=th.as_tensor(ei),
