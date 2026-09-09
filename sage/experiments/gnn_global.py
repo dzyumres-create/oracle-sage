@@ -24,6 +24,7 @@ from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy
 from sage.agent.tb_logging import TensorboardCallback
 from sage.agent.async_vec_env import AsyncVecEnv
+from sage.domains.gym_taxi.utils.wl_vocab_cache import configure_wl_vocab_override, reset_wl_vocab_override
 
 def run(variant):
 
@@ -194,7 +195,22 @@ def main(arglist):
         "--wl-vocab-path", type=str, default=None,
         help="path to a frozen WL-colour vocab JSON; when given, uses WLPlanFeedbackPolicy "
              "(WL-embedding meta-controller) instead of GNNPlanFeedbackPolicy for the "
-             "planner+feedback (Taxi) branch",
+             "planner+feedback (Taxi) branch. Must be given together with "
+             "--wl-num-iterations (required, no default) - see that flag's help.",
+    )
+    parser.add_argument(
+        "--wl-num-iterations", type=int, default=None,
+        help="WL refinement depth (L) that --wl-vocab-path's vocab was built/frozen at. "
+             "Required together with --wl-vocab-path (rejected at parse time if only one "
+             "is given) - deliberately has NO default, even though 1 was oracle_sage's "
+             "own original L: a vocab's colour ids are only meaningful for the exact L "
+             "they were built with, so guessing one would silently reintroduce the "
+             "vocab/L mismatch bug this flag pair exists to prevent, just moved to the "
+             "CLI layer. Configures env_to_graph/Planner.plan()'s WL colour computation "
+             "to match the SAME vocab+L WLPlanFeedbackPolicy loads via --wl-vocab-path "
+             "(see sage/domains/gym_taxi/utils/wl_vocab_cache.py's "
+             "configure_wl_vocab_override) - one source of truth for 'which vocab', "
+             "instead of two independently-configured ones that can drift apart.",
     )
     parser.add_argument(
         "--layer-norm", action="store_true", default=False, help="perform layer normalisation on inputs to path value function"
@@ -235,6 +251,14 @@ def main(arglist):
     )
 
     args = parser.parse_args(arglist)
+    if (args.wl_vocab_path is None) != (args.wl_num_iterations is None):
+        parser.error(
+            "--wl-vocab-path and --wl-num-iterations must be given together (or neither): "
+            f"got --wl-vocab-path={args.wl_vocab_path!r}, --wl-num-iterations={args.wl_num_iterations!r}. "
+            "A vocab's colour ids are only meaningful for the exact L it was built/frozen "
+            "at, so passing one without the other is rejected here rather than silently "
+            "guessing a default."
+        )
     if args.lr_decay:
         learning_rate = get_linear_fn(
             args.learning_rate, args.learning_rate/10, 0.5
@@ -284,6 +308,13 @@ def main(arglist):
     )
     if args.wl_vocab_path is not None:
         variant["algorithm_kwargs"]["policy_kwargs"]["wl_vocab_path"] = args.wl_vocab_path
+        # Point env_to_graph/Planner.plan()'s WL colour computation at the SAME
+        # vocab+L WLPlanFeedbackPolicy is about to load - one source of truth,
+        # see wl_vocab_cache.py's module docstring. Must happen before run()
+        # constructs the env/policy below.
+        configure_wl_vocab_override(args.wl_vocab_path, args.wl_num_iterations)
+    else:
+        reset_wl_vocab_override()
     # optionally set the GPU (default=False)
     run(variant)
 
