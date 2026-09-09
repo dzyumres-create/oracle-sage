@@ -333,8 +333,12 @@ def wl_colours(
     for _ in range(num_iterations):
         colours = refine(colours, edge_index, labels, vocab, frozen=frozen)
 
-    histogram = th.zeros(len(vocab), dtype=th.float, device=colours.device)
-    for c in colours.tolist():
-        histogram[c] += 1
+    # bincount, not a Python loop: colours is always th.long with every value
+    # in [0, len(vocab)) (see _resolve - its only two return paths are
+    # vocab[signature] or vocab[OOV_SIGNATURE], both valid ids), so
+    # minlength=len(vocab) is exact, never padding-short. .float() matches
+    # the histogram dtype every downstream consumer (concatenation, policy
+    # net input) already expects.
+    histogram = th.bincount(colours, minlength=len(vocab)).float()
 
     return colours, histogram
