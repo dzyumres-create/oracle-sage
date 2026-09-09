@@ -124,7 +124,12 @@ def initial_colours_vilg(x: th.Tensor) -> th.Tensor:
         looked up in) `vocab`; see `wl_colours` for how it is folded into
         the shared vocab id space.
     """
-    is_object = x[:, 0:3].any(dim=1)
+    # sum(dim=1) > 0, not .any(dim=1): x is float (see wl_colours()'s
+    # th.as_tensor(..., dtype=th.float) callers), and PyTorch <1.8's
+    # .any(dim=...) only accepts uint8/bool input, raising RuntimeError on a
+    # float tensor - this sandbox's torch silently accepts it, but RCP's
+    # 1.7.1+cu110 does not. Do not "simplify" this back to .any(dim=1).
+    is_object = x[:, 0:3].sum(dim=1) > 0
     obj_type = x[:, 0:3].argmax(dim=1)
     pred_id = x[:, 3:6].argmax(dim=1)
     status_id = x[:, 6:9].argmax(dim=1)
