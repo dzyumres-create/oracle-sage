@@ -218,18 +218,25 @@ class TestLengthCheckNeverFiresForOracleSageAndVilgOnCity(unittest.TestCase):
                 self.assertLess(max_len, GRAPH_CONVENTION_JSON_WIDTH[conv])
 
 
-class TestPlannerAtomRaisesNotImplemented(unittest.TestCase):
-    def test_plan_raises_before_touching_graph_to_networkx(self):
-        planner = Planner(graph_convention="atom")
-        with self.assertRaises(NotImplementedError) as ctx:
-            planner.plan(graph=None, goal=0)  # graph=None: if this reached graph_to_networkx it would AttributeError, not NotImplementedError
-        self.assertIn("atom planner: Step 3", str(ctx.exception))
+class TestPlannerAtomIsWired(unittest.TestCase):
+    """Step 3 implements the "atom" planner (planner.py's plan_atom) -- see
+    tests/test_atom_planner.py for its full correctness suite. This class only checks
+    that GraphTaxiEnv wires an "atom"-convention Planner through correctly and that a
+    plan() call actually runs end to end, which is this file's (wiring, not semantics)
+    concern."""
 
     def test_env_planner_is_atom_convention(self):
         env = GraphTaxiEnv(representation="graph", scenario="predictable5", mask=False, graph_convention="atom")
         self.assertEqual(env.observation_space.planner.graph_convention, "atom")
-        with self.assertRaises(NotImplementedError):
-            env.observation_space.planner.plan(graph=None, goal=0)
+
+    def test_plan_runs_end_to_end_on_a_real_observation(self):
+        env = GraphTaxiEnv(representation="graph", scenario="predictable5", mask=False, graph_convention="atom")
+        obs = env.reset()
+        batch = env.observation_space.converter([(obs,)])
+        graph = batch.to_data_list()[0]
+        projection, actions = env.observation_space.planner.plan(graph, 0)
+        self.assertIsInstance(actions, list)
+        self.assertEqual(projection.x.shape[1], 6)
 
 
 class TestAtomFullEpisodeVerification(unittest.TestCase):
