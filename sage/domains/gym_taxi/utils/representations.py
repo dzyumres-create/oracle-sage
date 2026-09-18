@@ -428,6 +428,17 @@ def env_to_atom_graph(env):
     return node_feats, edge_feats, edge_index, mask, global_feats
 
 
+def env_to_atom_json(env):
+    """
+    Converts taxi world state from env to json representation, using the atom-encoding
+    convention (see env_to_atom_graph) instead of Oracle-SAGE's object-only convention.
+
+    :param env: taxi world state in env format
+    :return: taxi world state in json format
+    """
+    return graph_to_json(*env_to_atom_graph(env))
+
+
 def env_to_image(env):
     """
     Converts taxi world state from env to image representation

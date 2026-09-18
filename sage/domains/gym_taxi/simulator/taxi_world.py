@@ -10,7 +10,7 @@ import networkx as nx
 
 from typing import List, NamedTuple
 
-from sage.domains.gym_taxi.utils.representations import env_to_image, env_to_json, env_to_vilg_json
+from sage.domains.gym_taxi.utils.representations import env_to_image, env_to_json, env_to_vilg_json, env_to_atom_json
 from sage.domains.gym_taxi.utils.config import MAX_EPISODE_LENGTH
 from sage.domains.gym_taxi.utils.utils import generate_random_walls, generate_city_maze
 
@@ -98,6 +98,8 @@ class TaxiWorldSimulator(object):
     def _get_state_json(self):
         if self.graph_convention == "vilg":
             return env_to_vilg_json(self)
+        elif self.graph_convention == "atom":
+            return env_to_atom_json(self)
         return env_to_json(self)
 
     def act(self, action):

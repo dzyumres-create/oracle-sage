@@ -62,7 +62,7 @@ def main(arglist):
         "--graph-convention",
         type=str,
         default="oracle_sage",
-        choices=["oracle_sage", "vilg"],
+        choices=["oracle_sage", "vilg", "atom"],
         help="graph construction convention for Taxi's graph observations (default: oracle_sage)",
     )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")

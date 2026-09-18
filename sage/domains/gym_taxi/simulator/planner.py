@@ -28,6 +28,13 @@ class Planner:
         self.graph_convention = graph_convention
 
     def plan(self,graph,goal):
+        if self.graph_convention == "atom":
+            # Step 3, not yet implemented. Without this explicit branch, "atom" would
+            # fall into the oracle_sage else-branch below and crash inside
+            # graph_to_networkx's hard-coded 3-way node unpack (atom's x has 6 columns,
+            # not 3) -- an accidental, confusing failure. This raises the same "not
+            # supported yet" fact on purpose, with a clear message instead.
+            raise NotImplementedError("atom planner: Step 3")
         if self.graph_convention == "vilg":
             state = graph_to_networkx_vilg(graph)
         else:
