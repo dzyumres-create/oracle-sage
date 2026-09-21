@@ -17,6 +17,7 @@ from math import floor, ceil
 import json
 import numpy as np
 import scipy.sparse as sp
+import torch as th
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
 from sage.domains.utils.representations import graph_to_json, EMB_SIZE
 import networkx as nx
@@ -338,10 +339,25 @@ def atoms_to_graph(atoms):
     return node_feats, edge_feats, edge_index
 
 
+def _to_numpy(value):
+    """
+    Accepts a torch.Tensor on ANY device, or anything np.asarray already handles (a numpy
+    array, a plain list). A bare `np.asarray` raises `TypeError: can't convert cuda:0
+    device type tensor to numpy` on a CUDA tensor -- this is the one call site that needs
+    to detach+move it to CPU first; numpy inputs (or CPU tensors) pass through
+    `np.asarray` exactly as before, so this is a strict superset of the old behaviour.
+    """
+    if isinstance(value, th.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
 def graph_to_atoms(x, edge_index, edge_attr):
     """
     Inverse of atoms_to_graph: decodes an atom-encoding graph back into a flat atom list.
-    Needed later by the planner (not wired in yet).
+    Used by the planner (sage/domains/gym_taxi/simulator/planner.py's plan_atom), whose
+    input graph may live on any device (CPU during evaluation, CUDA during GPU training
+    -- see plan_atom's own docstring) -- hence _to_numpy rather than a bare np.asarray.
 
     A row's predicate is read off its one-hot in `x` (see ATOM_PREDICATES). Type atoms
     (predicate in {location, taxi, passenger}) are exactly rows 0..n_obj-1, and row k's
@@ -351,14 +367,16 @@ def graph_to_atoms(x, edge_index, edge_attr):
     type atom's own sole argument is always at position 1, regardless of which position
     of `a` it fills.
 
-    :param x: node features, shape [N, 6] -- see ATOM_PREDICATES
-    :param edge_index: shape [2, E]
-    :param edge_attr: shape [E, 4], multi-hot over ATOM_LABELS
+    :param x: node features, shape [N, 6] -- see ATOM_PREDICATES. torch.Tensor (any
+        device) or numpy array.
+    :param edge_index: shape [2, E]. torch.Tensor (any device) or numpy array.
+    :param edge_attr: shape [E, 4], multi-hot over ATOM_LABELS. torch.Tensor (any device)
+        or numpy array.
     :return: list of (predicate, args_tuple), in row order -- see atoms_to_graph
     """
-    x = np.asarray(x)
-    edge_index = np.asarray(edge_index)
-    edge_attr = np.asarray(edge_attr)
+    x = _to_numpy(x)
+    edge_index = _to_numpy(edge_index)
+    edge_attr = _to_numpy(edge_attr)
     n = x.shape[0]
 
     predicate_idx = np.argmax(x, axis=1)
