@@ -22,6 +22,7 @@ from sage.agent.graph_policy import GNNPolicy
 from sage.agent.graph_feedback_policy import GNNFeedbackPolicy
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.tb_logging import TensorboardCallback
+from sage.agent.checkpoint_callback import PeriodicCheckpointCallback
 from sage.agent.async_vec_env import AsyncVecEnv
 
 def run(variant):
@@ -49,7 +50,14 @@ def run(variant):
     else:
         model = A2C(GNNPolicy, env, verbose=variant["verbose"],supported_action_spaces=(spaces.BinaryAction,gym.spaces.Discrete,spaces.Autoregressive),**variant["algorithm_kwargs"])
         
-    model.learn(total_timesteps=variant["num_env_steps"],log_interval=variant['log_interval'], callback=TensorboardCallback(variant["verbose"]))
+    # a plain list is auto-wrapped in CallbackList by BaseAlgorithm._init_callback --
+    # see sage/forks/stable_baselines3/stable_baselines3/common/base_class.py.
+    # checkpoint_interval<=0 disables checkpointing entirely (not just a no-op _on_step:
+    # the callback is never constructed, so it costs nothing per step either).
+    callbacks = [TensorboardCallback(variant["verbose"])]
+    if variant["checkpoint_interval"] > 0:
+        callbacks.append(PeriodicCheckpointCallback(variant["save_dir"], variant["checkpoint_interval"]))
+    model.learn(total_timesteps=variant["num_env_steps"],log_interval=variant['log_interval'], callback=callbacks)
     os.makedirs(variant["save_dir"], exist_ok=True)
     model.save(variant["save_dir"] + "/final_model")
 
@@ -162,6 +170,14 @@ def main(arglist):
         help="directory to save agent logs (default: ./trained_models/)",
     )
     parser.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=12000,
+        help="save a mid-training checkpoint to save_dir every this many total "
+             "timesteps (default: 12000, i.e. every 5 log blocks at "
+             "--num-processes 32 --log-interval 15). 0 disables checkpointing.",
+    )
+    parser.add_argument(
         "--no-cuda", action="store_true", default=False, help="disables CUDA training"
     )
     parser.add_argument(
@@ -244,6 +260,7 @@ def main(arglist):
         log_interval=args.log_interval,
         verbose=args.verbose,
         save_dir=args.save_dir,
+        checkpoint_interval=args.checkpoint_interval,
         feedback=args.feedback,
         planner=args.planner,
         algorithm_kwargs=dict(
