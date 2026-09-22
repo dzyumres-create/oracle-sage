@@ -18,8 +18,9 @@ import json
 import numpy as np
 import scipy.sparse as sp
 import torch as th
+from torch_geometric.data import Data, Batch
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
-from sage.domains.utils.representations import graph_to_json, EMB_SIZE
+from sage.domains.utils.representations import graph_to_json, json_default, EMB_SIZE
 import networkx as nx
 import cv2
 
@@ -446,15 +447,96 @@ def env_to_atom_graph(env):
     return node_feats, edge_feats, edge_index, mask, global_feats
 
 
+def atoms_to_json(atoms, global_feats):
+    """
+    Compact JSON serialisation for the atom convention: the flat atom list itself
+    (predicate index into ATOM_PREDICATES + its integer args) plus global_feats -- NOT
+    the expanded node_feats/edge_feats/edge_index atoms_to_graph would build from it.
+
+    mask is NOT serialised either: json_to_atom_graph (this format's decoder) recomputes
+    it from the atom list's own structure, the same way env_to_atom_graph/
+    _atoms_to_projection (planner.py) already do -- type atoms are always exactly the
+    first n_obj entries (env_to_atoms' own ordering invariant), so it carries no
+    independent information worth spending JSON bytes on.
+
+    A predicate INDEX (0-5) rather than its name string keeps each atom entry shorter --
+    e.g. `[1, 0]` vs `["taxi", 0]` -- which matters a lot at ~1000+ atoms/state; this is
+    exactly what made the OLD (expanded node_feats/edge_feats/edge_index) JSON format so
+    expensive to produce (~79% of a profiled RCP training run's wall time, per py-spy:
+    ~55% in json.dumps/json_default, ~19% in atoms_to_graph's scipy.sparse matmul -- both
+    now skipped entirely on the env side; see env_to_atom_json below).
+
+    :param atoms: list of (predicate, args_tuple), as returned by env_to_atoms
+    :param global_feats: shape [EMB_SIZE]
+    :return: JSON string
+    """
+    return json.dumps(
+        {
+            "atoms": [[ATOM_PREDICATES.index(predicate)] + [int(a) for a in args] for predicate, args in atoms],
+            "global_feats": global_feats,
+        },
+        default=json_default,
+    )
+
+
+def json_to_atom_graph(js):
+    """
+    Converter for the atom convention's compact JSON format (atoms_to_json): rebuilds
+    the SAME expanded Batch json_to_graph would produce from the old
+    node_feats/edge_feats/edge_index format, but starting from the compact atom-list wire
+    format instead -- x/edge_index/edge_attr are reconstructed via atoms_to_graph (the
+    exact same function env_to_atom_graph itself calls, so a live env's graph and a
+    decoded-from-JSON graph are built by identical code), and mask via the same "type
+    atoms are exactly the first n_obj rows" rule atoms_to_json's docstring explains.
+
+    Dtypes match json_to_graph's own real output exactly (verified empirically, not just
+    assumed): x/edge_attr float32, edge_index int64, mask bool, global_features float32
+    unsqueezed to a leading batch-of-1 dim. atoms_to_graph itself returns float64/int64
+    numpy arrays (see its own docstring), so -- unlike json_to_graph's plain-Python-list
+    inputs, which pick up torch's default dtype (float32) automatically -- the float32
+    cast here must be explicit, or x/edge_attr would silently come out float64 instead.
+
+    :param js: list of json objects representing vector of environments (same calling
+        convention as json_to_graph: each element indexable as `j[0]` for the JSON string)
+    :return: world state in batch (multi graph) format
+    """
+    envs = [json.loads(j[0]) for j in js]
+    data = []
+    for env in envs:
+        atoms = [(ATOM_PREDICATES[entry[0]], tuple(entry[1:])) for entry in env["atoms"]]
+        node_feats, edge_feats, edge_index = atoms_to_graph(atoms)
+        n_obj = sum(1 for predicate, _args in atoms if predicate in _TYPE_PREDICATES)
+        mask = np.zeros(node_feats.shape[0], dtype=bool)
+        mask[:n_obj] = True
+
+        d = Data(
+            x=th.as_tensor(node_feats, dtype=th.float32),
+            edge_attr=th.as_tensor(edge_feats, dtype=th.float32),
+            edge_index=th.as_tensor(edge_index, dtype=th.long),
+        )
+        d.mask = th.as_tensor(mask, dtype=th.bool)
+        d.global_features = th.as_tensor(env["global_feats"], dtype=th.float32).unsqueeze(0)
+        data.append(d)
+    return Batch.from_data_list(data)
+
+
 def env_to_atom_json(env):
     """
-    Converts taxi world state from env to json representation, using the atom-encoding
-    convention (see env_to_atom_graph) instead of Oracle-SAGE's object-only convention.
+    Converts taxi world state from env to json representation, using the atom
+    convention's compact wire format (atoms_to_json) -- NOT env_to_atom_graph, which
+    would build the full expanded node_feats/edge_feats/edge_index via atoms_to_graph's
+    scipy.sparse matmul on every single env step just to immediately serialise (and, on
+    the other end, immediately discard by re-decoding) -- see atoms_to_json's docstring.
+    env_to_atom_graph itself is untouched and still builds that expanded form directly
+    from an env, e.g. for tests or any caller that wants it without a JSON round trip.
 
     :param env: taxi world state in env format
-    :return: taxi world state in json format
+    :return: taxi world state in json format (atoms_to_json's compact format)
     """
-    return graph_to_json(*env_to_atom_graph(env))
+    atoms = env_to_atoms(env)
+    global_feats = np.zeros(EMB_SIZE, dtype=np.float64)
+    global_feats[0] = (env.timeout - env.time) / env.timeout
+    return atoms_to_json(atoms, global_feats)
 
 
 def env_to_image(env):

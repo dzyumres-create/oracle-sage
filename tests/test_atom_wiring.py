@@ -154,8 +154,12 @@ class TestObsSpaceUnchangedForOracleSageAndVilg(unittest.TestCase):
 
 class TestGraphConventionsAndWidths(unittest.TestCase):
     def test_atom_dims_and_width(self):
+        # atom's width was 600000 (Step 2a: ~1.25x its old EXPANDED-format measured max)
+        # -- re-measured at ~19,203 chars after switching to the compact atoms-list wire
+        # format (env_to_atom_json/atoms_to_json), so it dropped back to the shared
+        # 250000 default rather than keeping a bespoke value -- see taxi_env.py's comment.
         self.assertEqual(GRAPH_CONVENTIONS["atom"], (6, 4))
-        self.assertEqual(GRAPH_CONVENTION_JSON_WIDTH["atom"], 600000)
+        self.assertEqual(GRAPH_CONVENTION_JSON_WIDTH["atom"], 250000)
         self.assertEqual(GRAPH_CONVENTION_JSON_WIDTH["oracle_sage"], 250000)
         self.assertEqual(GRAPH_CONVENTION_JSON_WIDTH["vilg"], 250000)
 
@@ -163,8 +167,8 @@ class TestGraphConventionsAndWidths(unittest.TestCase):
         env = GraphTaxiEnv(representation="graph", scenario="predictable5", mask=False, graph_convention="atom")
         self.assertEqual(env.observation_space.node_dimension, 6)
         self.assertEqual(env.observation_space.edge_dimension, 4)
-        self.assertEqual(env.observation_space.width, 600000)
-        self.assertEqual(env.observation_space.dtype, np.dtype("U600000"))
+        self.assertEqual(env.observation_space.width, 250000)
+        self.assertEqual(env.observation_space.dtype, np.dtype("U250000"))
 
 
 class TestLengthCheckRaises(unittest.TestCase):
@@ -274,9 +278,9 @@ class TestAtomFullEpisodeVerification(unittest.TestCase):
 
 class TestJsonRoundTripNotTruncated(unittest.TestCase):
     """The string length surviving a real vec-env buffer round trip (DummyVecEnv/
-    AsyncVecEnv._save_obs, which writes into a fixed-width U600000 numpy buffer for
-    "atom") must equal the raw JSON's length -- i.e. genuinely not truncated, not just
-    "under the configured width" on paper."""
+    AsyncVecEnv._save_obs, which writes into a fixed-width numpy buffer -- U250000 for
+    "atom", same as oracle_sage/vilg) must equal the raw JSON's length -- i.e. genuinely
+    not truncated, not just "under the configured width" on paper."""
 
     def test_vec_env_buffer_preserves_full_length(self):
         for seed in CITY_SEEDS:
