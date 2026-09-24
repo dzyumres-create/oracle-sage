@@ -47,6 +47,34 @@ class PeriodicCheckpointCallback(BaseCallback):
         should be disabled (interval <= 0) -- see gnn_global.py
     :param keep: number of most recent checkpoints to retain (ranked by the numeric
         timestep in their filename, not file mtime)
+
+    Loading these checkpoints back is currently BROKEN for every graph_convention
+    (oracle_sage, vilg, atom) -- do not assume PlanFeedback_A2C.load(path) works when
+    evaluating a trained model. Two separate, pre-existing gaps, neither introduced by
+    this callback and neither fixed here:
+
+      1. observation_space is a JsonGraph (sage/domains/utils/spaces.py), which
+         subclasses gym.spaces.Box but never calls Box.__init__(), so it never sets
+         .low/.high. Newer gym's Box.__setstate__ unconditionally reads self.low during
+         unpickling, so cloudpickle.loads() raises
+         AttributeError: 'JsonGraph' object has no attribute 'low' the moment a saved
+         checkpoint's observation_space is deserialized.
+      2. The obvious workaround -- load(path, custom_objects={"observation_space": ...,
+         "action_space": ...}), which substitutes a live space instead of deserializing
+         the saved one -- does NOT work through this vendored SB3 fork as currently
+         written: BaseAlgorithm.load() (base_class.py) never forwards custom_objects to
+         load_from_zip_file(), which never forwards it to json_to_data() -- the one
+         function that actually implements custom_objects substitution. So
+         PlanFeedback_A2C.load(path, custom_objects={...}) still hits the same
+         AttributeError as a plain .load(path) call.
+
+    A proper fix needs both: (a) giving JsonGraph real .low/.high (e.g. dummy full
+    arrays) or rebasing it on plain gym.spaces.Space instead of Box, so it survives
+    pickling at all, and (b) threading custom_objects through
+    BaseAlgorithm.load()/load_from_zip_file() to json_to_data() as a belt-and-braces
+    fallback. Both changes are convention-agnostic -- JsonGraph and load() are shared by
+    all three conventions, so fixing this is not atom-specific and is out of scope for
+    Cell 5.
     """
 
     def __init__(self, save_dir: str, interval: int, keep: int = 2, verbose: int = 0):

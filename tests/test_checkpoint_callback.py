@@ -17,6 +17,12 @@ substitute -- it isolates the callback itself (not the whole pipeline) and prove
 consumes zero randomness directly, independent of the pipeline's own pre-existing
 non-reproducibility elsewhere.
 
+Loading a checkpoint back (PlanFeedback_A2C.load(path)) is currently broken for every
+graph_convention -- see the comment above this file's `if __name__ ==` block for the
+full diagnosis (JsonGraph doesn't survive pickling, and separately this SB3 fork's
+load() doesn't forward custom_objects to where it could work around that). Both are
+pre-existing gaps outside Task C's scope, so there is no load-and-forward test here.
+
 Run from the repo root with:
     python -m pytest tests/test_checkpoint_callback.py -v
 """
@@ -53,26 +59,6 @@ if not hasattr(np.random.Generator, "randint"):
         return _RandintCompatGenerator(generator), seed
 
     _seeding.np_random = _np_random_with_randint
-
-# Third, independent, unrelated sandbox-vs-RCP drift, hit specifically by
-# BaseAlgorithm.load(): gym 0.26's Box.__setstate__ (legacy-unpickle support) assumes
-# every Box has .low/.high and calls _short_repr(self.low) on them -- JsonGraph is a Box
-# subclass that never sets .low/.high (it holds JSON strings, not numeric bounds), so
-# unpickling a saved JsonGraph observation_space crashes with
-# AttributeError: 'JsonGraph' object has no attribute 'low'. Confirmed this reproduces
-# identically for graph_convention="oracle_sage" too -- convention-agnostic, pre-existing,
-# unrelated to Task C. RCP's pinned gym==0.18.0 predates this __setstate__ method
-# entirely. Test-harness-only: JsonGraph.__init__ never calls Box.__init__ either, so it
-# never relied on Box's normal low/high setup -- bypassing Box's legacy-compat unpickle
-# logic for this one class is safe, not a behaviour change to anything real.
-from sage.domains.utils.spaces import JsonGraph as _JsonGraph
-
-
-def _json_graph_setstate(self, state):
-    self.__dict__.update(state)
-
-
-_JsonGraph.__setstate__ = _json_graph_setstate
 
 
 class _FakeModel:
@@ -203,57 +189,46 @@ class TestCallbackConsumesNoRandomness(unittest.TestCase):
         env.close()
 
 
-class TestCheckpointLoadsAndPolicyRunsForward(unittest.TestCase):
-    """A checkpoint .zip loads with PlanFeedback_A2C.load(path) (no env argument), and
-    the resulting policy can run a forward pass on a real observation."""
-
-    def test_load_without_env_and_forward(self):
-        from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
-        from sage.agent.plan_feedback_a2c import PlanFeedback_A2C
-        from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
-        from sage.domains.gym_taxi import REWARDS
-        from sage.agent.async_vec_env import AsyncVecEnv
-        from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_vec_env
-        from sage.domains.utils import spaces as sage_spaces
-        import gym as gym_module
-
-        def make_env():
-            return GraphTaxiEnv(representation="graph", scenario="predictable5", mask=False, rewards=REWARDS["v1"], graph_convention="atom")
-
-        env = make_vec_env(make_env, n_envs=1, seed=0, monitor_kwargs={"info_keywords": ("len100", "len200")}, vec_env_cls=AsyncVecEnv)
-        # default gnn_steps (5), deliberately NOT overridden to a smaller value here:
-        # BaseAlgorithm.load() rebuilds the policy from data["policy_kwargs"] before
-        # loading the state_dict, and a non-default features_extractor_kwargs={"gnn_steps": N}
-        # was observed to round-trip incorrectly (the rebuilt policy came back with the
-        # DEFAULT gnn_steps=5 architecture instead of N, so load_state_dict then failed
-        # on a real shape/key mismatch) -- a pre-existing SB3-fork save/load gap,
-        # unrelated to Task C and out of scope here; using the default sidesteps it so
-        # this test verifies exactly what the task asked (a checkpoint loads and the
-        # policy runs forward), not that gap.
-        policy_kwargs = {
-            "optimizer_class": th.optim.AdamW, "optimizer_kwargs": {"weight_decay": 0.0001},
-            "ortho_init": False, "exploration_initial_eps": 0.0, "exploration_final_eps": 0.0,
-            "exploration_fraction": 0.0, "shared_gnn": True, "layer_norm": False,
-            "num_planning_choices": 1, "features_extractor_kwargs": {},
-        }
-        model = PlanFeedback_A2C(
-            GNNPlanFeedbackPolicy, env, verbose=0,
-            supported_action_spaces=(sage_spaces.BinaryAction, gym_module.spaces.Discrete, sage_spaces.Autoregressive),
-            n_steps=1, policy_kwargs=policy_kwargs,
-        )
-
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "checkpoint_1")
-            model.save(path)
-
-            loaded = PlanFeedback_A2C.load(path + ".zip")  # no env argument
-
-            obs = env.reset()
-            actions, values, log_prob, explored, plans = loaded.policy.forward(obs)
-            self.assertEqual(values.shape, (1, 1))
-            self.assertTrue(th.isfinite(values).all())
-
-        env.close()
+# NOT FIXED HERE -- checkpoint *loading* is currently broken for every graph_convention
+# (oracle_sage, vilg, atom alike), by two separate, pre-existing gaps outside Task C's
+# scope. There is deliberately no test in this file that loads a checkpoint back;
+# see checkpoint_callback.py's module docstring for the full writeup, and the diff
+# report ("report but do not fix") for what a proper fix of each would involve.
+#
+#   1. JsonGraph (sage/domains/utils/spaces.py) does not survive a pickle round trip: it
+#      subclasses gym.spaces.Box but never calls Box.__init__(), so it never sets
+#      .low/.high. Newer gym's Box.__setstate__ unconditionally does
+#      self.low_repr = _short_repr(self.low), which raises
+#      AttributeError: 'JsonGraph' object has no attribute 'low'. observation_space is a
+#      JsonGraph under all three conventions, so this hits all of them identically --
+#      confirmed directly for both graph_convention="oracle_sage" and "atom" (identical
+#      exception, same attribute, same call site). action_space (a plain
+#      gym.spaces.Discrete for all three conventions) is NOT itself affected in isolation.
+#   2. Separately, this vendored SB3 fork's BaseAlgorithm.load() (base_class.py:584) does
+#      not forward a custom_objects argument to load_from_zip_file() -- and
+#      load_from_zip_file() (save_util.py:359) does not forward one to json_to_data()
+#      either. json_to_data() itself DOES already support custom_objects (it substitutes
+#      a caller-supplied value for a named top-level key before ever attempting to
+#      cloudpickle-deserialise it), but that support is unreachable through .load() as
+#      currently written: PlanFeedback_A2C.load(f, custom_objects={...}) still raises the
+#      exact same JsonGraph AttributeError, because custom_objects silently becomes a
+#      stray kwarg merged into model.__dict__ post-hoc instead of ever reaching
+#      json_to_data. Confirmed directly by calling json_to_data() by hand with the same
+#      custom_objects dict -- it skips observation_space/action_space correctly and
+#      succeeds -- versus through PlanFeedback_A2C.load(), which does not.
+#
+# Bug (2) is likely also why the RCP failure names "action_space" rather than
+# "observation_space": save_util.py's json_to_data() has a real, separate loop-variable-
+# scoping issue in its `except RuntimeError:` branch -- `deserialized_object` is not
+# reset before the unconditional `return_data[data_key] = deserialized_object` line right
+# after the try/except, so on Python (no block scoping) a value left over from a
+# previously-processed dict key can leak into the currently-failing key's slot. This
+# wasn't independently re-confirmed against RCP's exact pinned versions, but it is the
+# most plausible explanation on hand for why the RCP warning names the key that ISN'T
+# the actual JsonGraph offender.
+#
+# Fixing either would mean editing sage/domains/utils/spaces.py or the SB3 fork under
+# sage/forks/stable_baselines3/ -- both explicitly out of scope for this task.
 
 
 if __name__ == "__main__":
