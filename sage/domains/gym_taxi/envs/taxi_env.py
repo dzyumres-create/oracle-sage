@@ -23,6 +23,7 @@ from sage.domains.gym_taxi.utils.spaces import Json
 from sage.domains.utils.representations import (
     json_to_graph,
 )
+from sage.domains.gym_taxi.utils.representations import json_to_atom_graph
 from sage.domains.gym_taxi.utils.config import (
     MAP,
     MAX_EPISODE_LENGTH,
@@ -98,6 +99,39 @@ CONVERTERS = {
 GRAPH_CONVENTIONS = {
     "oracle_sage": (3, 4),
     "vilg": (9, 2),
+    "atom": (6, 4),
+}
+
+# JsonGraph's converter (JSON string -> Batch) per graph-construction convention.
+# oracle_sage/vilg serialise (and decode) the full expanded node_feats/edge_feats/
+# edge_index every step, unchanged -- json_to_graph. atom instead serialises only the
+# flat atom list (env_to_atom_json / atoms_to_json), reconstructing the expanded form
+# lazily, only when a converter actually decodes it (json_to_atom_graph) -- profiling on
+# RCP found the OLD (expanded, oracle_sage-style) JSON format cost ~79% of a training
+# run's wall time, almost entirely in json.dumps/json_default serialising ~12,000 edges'
+# worth of numbers on every single env step, most of which (intermediate plan steps)
+# collect_rollouts immediately discards.
+GRAPH_CONVENTION_CONVERTERS = {
+    "oracle_sage": json_to_graph,
+    "vilg": json_to_graph,
+    "atom": json_to_atom_graph,
+}
+
+# JsonGraph's string-observation width (max JSON chars) per graph-construction
+# convention. oracle_sage/vilg keep the original 250000 (JsonGraph's own default)
+# unchanged -- see spaces.py. atom was 600000 (Step 2a: ~1.25x its OLD expanded-format
+# measured max of 471,918 chars) -- re-measured after switching atom to the compact
+# atoms-list wire format (env_to_atom_json/atoms_to_json): full-(2000-step)-episode max
+# is now only ~19,203 chars (seed 600, scenario="city", random valid-action policy) --
+# ~24.5x smaller, and already well under oracle_sage's own measured max (48,373). 1.25x
+# that would be ~24,000, but there's no reason to hand-fit such a tight bound (seed
+# variance alone moved city road-edge counts ~5% across 200 fresh mazes, Step 2b) when
+# the shared 250000 default already gives ~13x headroom, same margin oracle_sage/vilg
+# get -- so atom drops back to the shared default rather than keeping a bespoke value.
+GRAPH_CONVENTION_JSON_WIDTH = {
+    "oracle_sage": 250000,
+    "vilg": 250000,
+    "atom": 250000,
 }
 
 
@@ -550,7 +584,9 @@ class GraphTaxiEnv(BaseTaxiEnv):
         #image = _construct_image(representation, scenario)
         node_dimension, edge_dimension = GRAPH_CONVENTIONS[graph_convention]
         self.observation_space = JsonGraph(
-            converter=json_to_graph,node_dimension=node_dimension,edge_dimension=edge_dimension, planner=Planner(graph_convention=self.graph_convention)
+            converter=GRAPH_CONVENTION_CONVERTERS[graph_convention],node_dimension=node_dimension,edge_dimension=edge_dimension,
+            planner=Planner(graph_convention=self.graph_convention),
+            width=GRAPH_CONVENTION_JSON_WIDTH[graph_convention],
         )
         self.first = True
         if scenario == "original":
@@ -565,14 +601,35 @@ class GraphTaxiEnv(BaseTaxiEnv):
             graph_convention=self.graph_convention,
         )
 
+    def _check_json_length(self, obs):
+        """
+        Loud failure for the one thing JsonGraph's fixed-width numpy string dtype cannot
+        detect on its own: a vec env's buffer write (DummyVecEnv/AsyncVecEnv._save_obs)
+        silently truncates any string longer than observation_space.dtype's width, with
+        no exception -- see Step 2a's investigation. Checking here, right where the raw
+        JSON string is produced and observation_space.width is already in scope, catches
+        it before it ever reaches that buffer, for every graph_convention uniformly (not
+        just "atom" -- though per Step 2a's measurements this can never fire for
+        oracle_sage/vilg, whose measured maxima are far below their shared 250000 width).
+        """
+        if len(obs) > self.observation_space.width:
+            raise ValueError(
+                f"observation JSON length {len(obs)} exceeds JsonGraph width "
+                f"{self.observation_space.width} for graph_convention={self.graph_convention!r} "
+                f"-- increase GRAPH_CONVENTION_JSON_WIDTH[{self.graph_convention!r}]"
+            )
+
     def step(self, action):
         obs, reward, done, info = self._step(action)
+        self._check_json_length(obs)
         info['s_true'] = obs
         info['d_true'] = done
-        return obs, reward, done, info 
+        return obs, reward, done, info
 
     def reset(self):
-        return super().reset()
+        obs = super().reset()
+        self._check_json_length(obs)
+        return obs
 
     def convert_to_human(self, js):
         img = json_to_image(js)

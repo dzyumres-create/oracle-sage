@@ -2,11 +2,13 @@ from os import remove
 import numpy as np
 import torch as th
 import networkx as nx
+from torch_geometric.data import Data
 
 from typing import List, NamedTuple
 
 from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations
 from sage.domains.utils.wl_colours import wl_colours
+from sage.domains.gym_taxi.utils.representations import ATOM_PREDICATES, graph_to_atoms, atoms_to_graph
 
 
 class Taxi(NamedTuple):
@@ -31,6 +33,8 @@ class Planner:
         self.graph_convention = graph_convention
 
     def plan(self,graph,goal):
+        if self.graph_convention == "atom":
+            return plan_atom(graph, goal)
         if self.graph_convention == "vilg":
             state = graph_to_networkx_vilg(graph)
         else:
@@ -327,3 +331,212 @@ def move_taxi(graph,taxi,node):
 def increment_timer(projection,actions):
     projection.global_features[0,0] = projection.global_features[0,0] - (len(actions)/2000)
     return projection, actions
+
+
+# --- atom encoding (Step 3, Horcik et al. Def. 2) ---------------------------------------
+#
+# oracle_sage's move_taxi/remove_node_from_graph mutate graph.x/.edge_index/.edge_attr in
+# place, relying on positional invariants that don't hold for the atom encoding (e.g.
+# remove_node_from_graph blindly chops the LAST row off x, assuming the removed node is
+# always the highest-indexed one; move_taxi identifies the tether's reverse copy via a
+# single edge_attr[:,3]==-1 flag that has no atom-encoding analogue). Rather than
+# reinventing an equally fragile positional scheme for atom-atom edges, this decodes the
+# input graph back to a flat atom list (graph_to_atoms, already proven by Step 1's tests),
+# computes the new logical state as a plain Python transformation of that list, then
+# re-encodes from scratch via atoms_to_graph -- the exact same function env_to_atom_graph
+# uses to build a live env's graph, so a projected graph and a live env_to_atom_graph
+# output are constructed by identical code, not two parallel implementations that could
+# drift apart. No tensor is ever edited in place; the returned Data is always freshly
+# built, and the input `graph` is never touched (see plan_atom's docstring).
+
+_ATOM_TYPE_PREDICATES = set(ATOM_PREDICATES[:3])  # {"location", "taxi", "passenger"}
+
+
+def graph_to_state_atom(graph):
+    """
+    Decodes an atom-encoding graph into the same State(graph, taxi, passengers) shape
+    graph_to_networkx/graph_to_networkx_vilg produce, so find_path_to and the goal-match
+    conditions in plan_atom read identically to the oracle_sage/vilg branches. `state.graph`
+    is an UNDIRECTED nx.Graph built directly from `adjacent` atoms (Horcik's atom encoding
+    has no direct location-location edge otherwise) -- matching graph_to_networkx's own
+    nx.Graph(...) (undirected) semantics, per this task's instruction.
+
+    state.taxi.passenger is always None here -- this is not a simplification, it exactly
+    mirrors graph_to_networkx's own real behaviour: Taxi(i, location.item(), None)
+    hardcodes None regardless of whether a passenger is actually being carried. plan()'s
+    "goal == taxi.node" branch's "if state.taxi.passenger is not None" check is therefore
+    already always False for oracle_sage today; a carried passenger is delivered by
+    selecting THEIR OWN node as goal instead (deliver_passenger's "already at taxi.node"
+    case delegates to deliver_current_passenger regardless). Replicating this exactly
+    (rather than "fixing" it) keeps atom's actions list identical to oracle_sage's for
+    the same logical state, which is the whole point of this convention existing.
+
+    :param graph: atom-encoding Data (x: [N,6], edge_index: [2,E], edge_attr: [E,4])
+    :return: (state, atoms) -- state is the State(...) described above; atoms is the full
+        flat atom list (graph_to_atoms' output), which plan_atom needs for re-encoding
+    """
+    atoms = graph_to_atoms(graph.x, graph.edge_index, graph.edge_attr)
+
+    taxi_row = None
+    passenger_rows = set()
+    for predicate, args in atoms:
+        if predicate == "taxi":
+            taxi_row = args[0]
+        elif predicate == "passenger":
+            passenger_rows.add(args[0])
+
+    road_graph = nx.Graph()
+    taxi_location = None
+    passenger_location = {}
+    passenger_destination = {}
+    for predicate, args in atoms:
+        if predicate == "location":
+            road_graph.add_node(args[0])
+        elif predicate == "adjacent":
+            road_graph.add_edge(args[0], args[1])
+        elif predicate == "in":
+            subject, container = args
+            if subject == taxi_row:
+                taxi_location = container
+            elif subject in passenger_rows:
+                passenger_location[subject] = container
+        elif predicate == "destination":
+            subject, dest = args
+            if subject in passenger_rows:
+                passenger_destination[subject] = dest
+
+    taxi = Taxi(taxi_row, taxi_location, None)
+    passengers = [
+        Passenger(pid, passenger_location[pid], passenger_destination[pid])
+        for pid in sorted(passenger_rows)
+    ]
+    return State(road_graph, taxi, passengers), atoms
+
+
+def _move_taxi_atoms(atoms, taxi_row, new_location):
+    """Pure (non-mutating): returns a NEW atom list with the taxi's `in` atom's location
+    argument replaced by new_location. Node count/numbering is unchanged -- only one
+    atom's args differ, mirroring move_taxi's effect without touching any tensor."""
+    new_atoms = []
+    for predicate, args in atoms:
+        if predicate == "in" and args[0] == taxi_row:
+            new_atoms.append((predicate, (taxi_row, new_location)))
+        else:
+            new_atoms.append((predicate, args))
+    return new_atoms
+
+
+def _deliver_atoms(atoms, taxi_row, passenger_row, destination):
+    """
+    Pure (non-mutating): returns a NEW atom list reflecting a delivery -- the atom-level
+    equivalent of move_taxi(..., destination) + remove_node_from_graph(..., passenger).
+    The taxi's `in` atom is redirected to `destination` (the projected graph jumps
+    straight to the post-delivery state, exactly like oracle_sage -- no intermediate
+    "passenger aboard" state is ever represented), and every atom mentioning
+    passenger_row as an argument (its own type atom, its `in` atom, its `destination`
+    atom) is dropped.
+
+    Object ids are then renumbered contiguously over the survivors, in ascending order --
+    exactly mirroring TaxiWorldSimulator.resort_passengers' own
+    `{k: v for v, k in enumerate(sorted(self.graph.nodes))}` scheme. Locations and the
+    taxi never move (they're always numbered below every passenger id, and removing one
+    passenger only ever shifts higher-numbered passengers down by one -- same invariant
+    resort_passengers relies on), so this only ever renumbers passenger ids above the
+    removed one. Type atoms are placed first, sorted by their new id, so the result's
+    row k is object k -- matching env_to_atoms' own convention exactly.
+    """
+    moved = _move_taxi_atoms(atoms, taxi_row, destination)
+    kept = [(predicate, args) for predicate, args in moved if passenger_row not in args]
+
+    n_obj_old = sum(1 for predicate, _args in atoms if predicate in _ATOM_TYPE_PREDICATES)
+    surviving_objects = [obj for obj in range(n_obj_old) if obj != passenger_row]
+    remap = {old: new for new, old in enumerate(surviving_objects)}
+
+    type_atoms = []
+    proposition_atoms = []
+    for predicate, args in kept:
+        new_args = tuple(remap[a] for a in args)
+        if predicate in _ATOM_TYPE_PREDICATES:
+            type_atoms.append((new_args[0], (predicate, new_args)))
+        else:
+            proposition_atoms.append((predicate, new_args))
+    type_atoms.sort(key=lambda item: item[0])
+
+    return [atom for _new_row, atom in type_atoms] + proposition_atoms
+
+
+def _atoms_to_projection(atoms, reference_graph):
+    """
+    Re-encodes `atoms` into a fresh Data via atoms_to_graph -- the SAME function
+    env_to_atom_graph uses -- then attaches mask (True on type-atom rows only, matching
+    env_to_atom_graph's planning=True convention) and a CLONE of reference_graph's
+    global_features (increment_timer mutates global_features in place; cloning keeps
+    `reference_graph`, the caller's input, untouched). dtype/device match json_to_graph's
+    real output exactly (x/edge_attr float32, edge_index int64, mask bool), on whichever
+    device reference_graph itself lives on.
+    """
+    node_feats, edge_feats, edge_index = atoms_to_graph(atoms)
+    n_obj = sum(1 for predicate, _args in atoms if predicate in _ATOM_TYPE_PREDICATES)
+    mask = np.zeros(node_feats.shape[0], dtype=bool)
+    mask[:n_obj] = True
+
+    device = reference_graph.x.device
+    projection = Data(
+        x=th.as_tensor(node_feats, dtype=th.float32, device=device),
+        edge_index=th.as_tensor(edge_index, dtype=th.long, device=device),
+        edge_attr=th.as_tensor(edge_feats, dtype=th.float32, device=device),
+    )
+    projection.mask = th.as_tensor(mask, dtype=th.bool, device=device)
+    projection.global_features = reference_graph.global_features.clone()
+    return projection
+
+
+def plan_atom(graph, goal):
+    """
+    The "atom" convention's Planner.plan implementation (Step 3): decode -> plan ->
+    re-encode, never in-place tensor edits -- see this section's module-level comment.
+    Branch structure and `actions` construction are a direct atom-level mirror of
+    oracle_sage's plan()/deliver_current_passenger/deliver_passenger/move (down to the
+    state.taxi.passenger-is-always-None quirk -- see graph_to_state_atom), so the
+    returned `actions` list is identical to what the oracle_sage branch would return for
+    the same logical state.
+
+    :param graph: atom-encoding Data (never mutated)
+    :param goal: node id the policy selected
+    :return: (projection, actions) -- projection is a freshly-built Data, never `graph` itself
+    """
+    state, atoms = graph_to_state_atom(graph)
+    taxi_row = state.taxi.node
+
+    if goal == state.taxi.node:
+        if state.taxi.passenger is not None:
+            # Always unreachable today -- state.taxi.passenger is hardcoded None (see
+            # graph_to_state_atom) -- kept only so this mirrors oracle_sage's branch
+            # structure exactly, in case that upstream quirk is ever fixed.
+            passenger = [p for p in state.passengers if p.location == state.taxi.node][0]
+            move = find_path_to(state, state.taxi.location, passenger.destination)
+            projected_atoms = _deliver_atoms(atoms, taxi_row, passenger.node, passenger.destination)
+            actions = move + [state.taxi.node]
+        else:
+            projected_atoms = atoms
+            actions = []
+    elif goal in [p.node for p in state.passengers]:
+        passenger = [p for p in state.passengers if p.node == goal][0]
+        if passenger.location == state.taxi.node:
+            move = find_path_to(state, state.taxi.location, passenger.destination)
+            projected_atoms = _deliver_atoms(atoms, taxi_row, passenger.node, passenger.destination)
+            actions = move + [state.taxi.node]
+        else:
+            move1 = find_path_to(state, state.taxi.location, passenger.location)
+            move2 = find_path_to(state, passenger.location, passenger.destination)
+            projected_atoms = _deliver_atoms(atoms, taxi_row, passenger.node, passenger.destination)
+            actions = move1 + [passenger.node] + move2 + [state.taxi.node]
+    else:
+        actions = find_path_to(state, state.taxi.location, goal)
+        projected_atoms = _move_taxi_atoms(atoms, taxi_row, goal)
+
+    if actions == []:
+        actions = [state.taxi.location]
+
+    projection = _atoms_to_projection(projected_atoms, graph)
+    return increment_timer(projection, actions)
