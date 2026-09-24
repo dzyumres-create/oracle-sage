@@ -325,11 +325,23 @@ def main(arglist):
     )
     if args.wl_vocab_path is not None:
         variant["algorithm_kwargs"]["policy_kwargs"]["wl_vocab_path"] = args.wl_vocab_path
+        # wl_num_iterations/graph_convention passed to the policy too - see
+        # WLPlanFeedbackPolicy.__init__ - so BOTH vocab-loading paths (this
+        # override, and the policy's own _load_vocab) validate against the
+        # SAME expected convention+L, from the SAME --wl-num-iterations/
+        # --graph-convention values, rather than two independently-derived
+        # checks that could silently drift apart.
+        variant["algorithm_kwargs"]["policy_kwargs"]["wl_num_iterations"] = args.wl_num_iterations
+        variant["algorithm_kwargs"]["policy_kwargs"]["graph_convention"] = args.graph_convention
         # Point env_to_graph/Planner.plan()'s WL colour computation at the SAME
         # vocab+L WLPlanFeedbackPolicy is about to load - one source of truth,
         # see wl_vocab_cache.py's module docstring. Must happen before run()
-        # constructs the env/policy below.
-        configure_wl_vocab_override(args.wl_vocab_path, args.wl_num_iterations)
+        # constructs the env/policy below. graph_convention is passed through
+        # so a vocab whose recorded metadata doesn't match this run's actual
+        # convention (e.g. an oracle_sage vocab under --graph-convention atom)
+        # raises here, immediately, rather than producing silently-wrong
+        # colour ids once training starts.
+        configure_wl_vocab_override(args.wl_vocab_path, args.wl_num_iterations, graph_convention=args.graph_convention)
     else:
         reset_wl_vocab_override()
     # optionally set the GPU (default=False)

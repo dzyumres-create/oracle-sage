@@ -36,10 +36,10 @@ from torch_geometric.data import Batch
 from sage.agent.graph_policy import EMB_SIZE
 from sage.agent.graph_feedback_policy import PathValueNet
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
-from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH, _decode_signature
+from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH, _decode_signature, validate_wl_vocab_metadata
 
 
-def _load_vocab(path) -> dict:
+def _load_vocab(path, graph_convention=None, num_iterations=None) -> dict:
     """
     Loads a frozen WL-colour vocab from an arbitrary `path`, in the same
     signature -> colour id format wl_colours() expects.
@@ -50,9 +50,25 @@ def _load_vocab(path) -> dict:
     (WL_VOCAB_PATH) with no path parameter, whereas WLPlanFeedbackPolicy
     needs an arbitrary, CLI-configurable path (--wl-vocab-path). Only this
     thin, path-parameterised loop is new; the encoding scheme is shared.
+
+    Validates the vocab's own recorded metadata (if any) against
+    `graph_convention`/`num_iterations` via wl_vocab_cache's shared
+    validate_wl_vocab_metadata -- the SAME check configure_wl_vocab_override
+    runs on the OTHER vocab-loading path (env_to_graph/Planner.plan's), so
+    the two can never validate against different rules. Both default to
+    None, matching every existing caller of this function/WLPlanFeedbackPolicy
+    that never passed them (oracle_sage/vilg runs, and every current test) -
+    None skips its respective check entirely, so those callers are
+    completely unaffected.
     """
     with open(path) as f:
         payload = json.load(f)
+
+    metadata = None
+    if "graph_convention" in payload and "num_iterations" in payload:
+        metadata = {"graph_convention": payload["graph_convention"], "num_iterations": payload["num_iterations"]}
+    validate_wl_vocab_metadata(metadata, graph_convention, num_iterations, "WLPlanFeedbackPolicy._load_vocab")
+
     vocab = {}
     for entry in payload["entries"]:
         vocab[_decode_signature(entry["signature"])] = entry["id"]
@@ -85,11 +101,23 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
     (gnn_extractor2 aliasing under shared_gnn=True).
     """
 
-    def __init__(self, *args, wl_vocab_path: str = str(WL_VOCAB_PATH), **kwargs):
+    def __init__(
+        self, *args, wl_vocab_path: str = str(WL_VOCAB_PATH),
+        wl_num_iterations: int = None, graph_convention: str = None, **kwargs,
+    ):
         # Must be set before super().__init__(): _build_gnn_extractor(),
         # called from within that chain, needs self.wl_vocab_path already
         # present to load the vocab and size the embedding table.
         self.wl_vocab_path = wl_vocab_path
+        # Both None by default (matching every existing caller, which never
+        # passed either) - _load_vocab treats None as "skip this check", so
+        # oracle_sage/vilg construction (and every current test) is
+        # unaffected. gnn_global.py passes both explicitly, from the SAME
+        # --wl-num-iterations/--graph-convention values
+        # configure_wl_vocab_override was already given - one source of
+        # truth, not two independently-configured checks that could drift.
+        self.wl_num_iterations = wl_num_iterations
+        self.wl_graph_convention = graph_convention
         super().__init__(*args, **kwargs)
         # No manual _build_path_value_net() call needed here: GNNPolicy._build()
         # (called from within super().__init__()'s chain, before optimizer
@@ -101,7 +129,7 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         # before that dispatch happens, so it's already available.
 
     def _build_gnn_extractor(self) -> None:
-        self._wl_vocab = _load_vocab(self.wl_vocab_path)
+        self._wl_vocab = _load_vocab(self.wl_vocab_path, self.wl_graph_convention, self.wl_num_iterations)
         self.wl_vocab_size = len(self._wl_vocab)
         self.gnn_extractor = WLEmbeddingExtractor(self.wl_vocab_size, EMB_SIZE)
 

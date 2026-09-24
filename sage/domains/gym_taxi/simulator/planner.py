@@ -8,7 +8,7 @@ from typing import List, NamedTuple
 
 from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations
 from sage.domains.utils.wl_colours import wl_colours
-from sage.domains.gym_taxi.utils.representations import ATOM_PREDICATES, graph_to_atoms, atoms_to_graph
+from sage.domains.gym_taxi.utils.representations import ATOM_PREDICATES, graph_to_atoms, atoms_to_graph, attach_wl
 
 
 class Taxi(NamedTuple):
@@ -474,6 +474,12 @@ def _atoms_to_projection(atoms, reference_graph):
     `reference_graph`, the caller's input, untouched). dtype/device match json_to_graph's
     real output exactly (x/edge_attr float32, edge_index int64, mask bool), on whichever
     device reference_graph itself lives on.
+
+    attach_wl(projection) is called last, mirroring json_to_atom_graph's own call
+    exactly (same shared helper, see its docstring) -- a no-op unless a WL vocab
+    override is configured, in which case the returned projection carries
+    wl_colours/wl_histogram just like a live env_to_atom_json-decoded state does, which
+    is what WLPlanFeedbackPolicy._encode_projected_state needs from a projected batch.
     """
     node_feats, edge_feats, edge_index = atoms_to_graph(atoms)
     n_obj = sum(1 for predicate, _args in atoms if predicate in _ATOM_TYPE_PREDICATES)
@@ -488,6 +494,7 @@ def _atoms_to_projection(atoms, reference_graph):
     )
     projection.mask = th.as_tensor(mask, dtype=th.bool, device=device)
     projection.global_features = reference_graph.global_features.clone()
+    attach_wl(projection)
     return projection
 
 

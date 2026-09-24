@@ -137,6 +137,33 @@ def initial_colours_vilg(x: th.Tensor) -> th.Tensor:
     return th.where(is_object, obj_type, prop_colour).long()
 
 
+def initial_colours_atom(x: th.Tensor) -> th.Tensor:
+    """
+    Assigns each node its initial WL colour from the atom encoding's node features (see
+    atoms_to_graph, sage/domains/gym_taxi/utils/representations.py): a 6-column one-hot
+    over ATOM_PREDICATES (location/taxi/passenger/adjacent/in/destination).
+
+    Unlike vILG's node features (initial_colours_vilg, disjoint object-type/predicate/
+    status blocks that can have several simultaneously-active columns), every atom row -
+    type atom or proposition atom alike - has EXACTLY one active column: they all share
+    the same flat one-hot encoding, not disjoint feature blocks. A plain argmax is
+    therefore lossless here, unlike the whole-vector argmax initial_colours_vilg's
+    docstring warns against - but that losslessness is asserted explicitly below rather
+    than silently assumed, since a future encoding drift in atoms_to_graph (e.g. a
+    genuinely multi-hot row) would otherwise resolve to a wrong-but-plausible colour
+    instead of a loud failure.
+
+    :param x: node features, shape [N, 6], one-hot over ATOM_PREDICATES
+    :return: initial colour per node, shape [N], dtype long, values in {0, ..., 5}
+    """
+    if not th.all(x.sum(dim=1) == 1):
+        raise ValueError(
+            "initial_colours_atom expects exactly one-hot rows (atoms_to_graph's "
+            "node_feats); got at least one row with a column sum != 1."
+        )
+    return th.argmax(x, dim=1).long()
+
+
 def edge_labels_vilg(edge_attr: th.Tensor) -> th.Tensor:
     """
     Combines vILG's edge argument-position into a categorical edge label.
@@ -181,6 +208,45 @@ def edge_labels(edge_attr: th.Tensor) -> th.Tensor:
     type_id = th.argmax(edge_attr[:, 0:3], dim=1)
     direction_bit = (edge_attr[:, 3] <= 0).long()
     return type_id * 2 + direction_bit
+
+
+def edge_labels_atom(edge_attr: th.Tensor) -> th.Tensor:
+    """
+    Combines the atom encoding's 4-bit multi-hot edge label (ATOM_LABELS = [(1,1),(1,2),
+    (2,1),(2,2)], see atoms_to_graph, sage/domains/gym_taxi/utils/representations.py)
+    into a single categorical label, as an integer BITMASK - NOT argmax, unlike
+    edge_labels/edge_labels_vilg. Those two are single-bit one-hots by construction, so
+    argmax is lossless for them; an atom-atom edge can instead carry MULTIPLE
+    simultaneous labels at once (e.g. two arity-2 atoms sharing both their position-1 AND
+    position-2 arguments sets both the (1,1) and (2,2) bits - see atoms_to_graph's
+    np.maximum.at merge step, which explicitly preserves co-occurring labels rather than
+    picking one). Taking argmax here would silently collapse a genuinely multi-label edge
+    onto just its lowest-set bit, discarding real structure Horcik et al.'s Def. 2
+    requires WL to see.
+
+    bit_i * 2^i over the 4 columns instead maps each of the 16 possible on/off
+    combinations to a distinct integer in {1, ..., 15} (0 is impossible - see the
+    non-zero assertion below) - a plain, hashable, comparable colour like any other, with
+    no further meaning attached to its numeric value (it is never decoded back to bits).
+
+    :param edge_attr: edge attributes, shape [E, 4], 0/1 multi-hot over ATOM_LABELS
+    :return: label per edge, shape [E], dtype long, values in {1, ..., 15}
+    """
+    if not th.all((edge_attr == 0) | (edge_attr == 1)):
+        raise ValueError(
+            "edge_labels_atom expects a 0/1 multi-hot edge_attr (atoms_to_graph's "
+            "edge_feats); got a value that is neither 0 nor 1."
+        )
+    bits = th.as_tensor([1, 2, 4, 8], dtype=edge_attr.dtype, device=edge_attr.device)
+    labels = (edge_attr * bits).sum(dim=1).long()
+    if not th.all(labels > 0):
+        raise ValueError(
+            "edge_labels_atom expects every edge to have at least one active label bit "
+            "(atoms_to_graph never emits an all-zero edge_feats row - every edge exists "
+            "because two atoms share an argument at some (i, j) position); got an edge "
+            "with an all-zero label."
+        )
+    return labels
 
 
 def refine(
@@ -255,10 +321,11 @@ def wl_colours(
 
     `graph_convention` selects which (initial_colours, edge_labels) decoder
     pair to use - "oracle_sage" (default, unchanged) uses `initial_colours`/
-    `edge_labels`; "vilg" uses `initial_colours_vilg`/`edge_labels_vilg`
-    instead, since vILG's node/edge feature layout (see env_to_vilg_graph,
-    sage/domains/gym_taxi/utils/representations.py) is shaped differently
-    from Oracle-SAGE's. This is threaded through explicitly by the caller
+    `edge_labels`; "vilg" uses `initial_colours_vilg`/`edge_labels_vilg`;
+    "atom" uses `initial_colours_atom`/`edge_labels_atom` - since each
+    convention's node/edge feature layout (see env_to_vilg_graph /
+    atoms_to_graph, sage/domains/gym_taxi/utils/representations.py) is
+    shaped differently. This is threaded through explicitly by the caller
     (which already knows its own graph_convention - see
     sage/domains/gym_taxi/utils/representations.py and sage/domains/
     gym_taxi/simulator/planner.py) rather than auto-detected from tensor
@@ -287,10 +354,14 @@ def wl_colours(
 
     :param x: node features - shape [N, 3] for "oracle_sage" (see
         `initial_colours`), shape [N, 9] for "vilg" (see
-        `initial_colours_vilg`)
+        `initial_colours_vilg`), shape [N, 6] for "atom" (see
+        `initial_colours_atom`)
     :param edge_index: edge index, shape [2, E]
     :param edge_attr: edge attributes - shape [E, 4] for "oracle_sage" (see
-        `edge_labels`), shape [E, 2] for "vilg" (see `edge_labels_vilg`)
+        `edge_labels`), shape [E, 2] for "vilg" (see `edge_labels_vilg`),
+        shape [E, 4] for "atom" (see `edge_labels_atom` - same width as
+        oracle_sage's edge_attr, but a 4-bit multi-hot, not
+        [is_road,is_tether,is_destination,direction])
     :param num_iterations: number of refinement iterations, L (default 5)
     :param vocab: signature -> colour id, mutated in place (unless
         `frozen`) and shared across calls so that colour ids remain stable
@@ -298,18 +369,18 @@ def wl_colours(
     :param frozen: if True, treat `vocab` as read-only (see above).
         Requires `freeze_vocab(vocab)` to have been called first - raises
         ValueError otherwise.
-    :param graph_convention: "oracle_sage" (default) or "vilg" - selects
-        the decoder pair, see above.
+    :param graph_convention: "oracle_sage" (default), "vilg", or "atom" -
+        selects the decoder pair, see above.
     :return: (colours, histogram)
         colours: final per-node colour id, shape [N], dtype long
         histogram: count of nodes with colour id i, shape [len(vocab)]
             after this call, dtype float, zero for ids not present in this
             graph
     """
-    if graph_convention not in ("oracle_sage", "vilg"):
+    if graph_convention not in ("oracle_sage", "vilg", "atom"):
         raise ValueError(
             f'wl_colours() got graph_convention={graph_convention!r}; expected '
-            f'"oracle_sage" or "vilg".'
+            f'"oracle_sage", "vilg", or "atom".'
         )
 
     if vocab is None:
@@ -319,6 +390,8 @@ def wl_colours(
 
     if graph_convention == "vilg":
         type_colours = initial_colours_vilg(x).tolist()
+    elif graph_convention == "atom":
+        type_colours = initial_colours_atom(x).tolist()
     else:
         type_colours = initial_colours(x).tolist()
     colours = th.empty(x.shape[0], dtype=th.long, device=x.device)
@@ -328,6 +401,8 @@ def wl_colours(
 
     if graph_convention == "vilg":
         labels = edge_labels_vilg(edge_attr)
+    elif graph_convention == "atom":
+        labels = edge_labels_atom(edge_attr)
     else:
         labels = edge_labels(edge_attr)
     for _ in range(num_iterations):

@@ -11,11 +11,14 @@ import torch as th
 from sage.domains.utils.wl_colours import (
     OOV_SIGNATURE,
     edge_labels,
+    edge_labels_atom,
     freeze_vocab,
     initial_colours,
+    initial_colours_atom,
     refine,
     wl_colours,
 )
+from sage.domains.gym_taxi.utils.representations import atoms_to_graph as _atoms_to_graph
 
 
 LOCATION = [1, 0, 0]
@@ -88,6 +91,65 @@ class TestInitialColoursAndEdgeLabels(unittest.TestCase):
         self.assertTrue(
             th.equal(labels, th.tensor([0, 2, 3, 4, 5], dtype=th.long))
         )
+
+
+class TestInitialColoursAndEdgeLabelsAtom(unittest.TestCase):
+    """initial_colours_atom / edge_labels_atom (the atom convention's WL decoder pair) -
+    built from real atoms_to_graph output, not hand-typed tensors, so these also
+    exercise atoms_to_graph's own multi-hot construction, not just the decoders."""
+
+    def test_initial_colours_atom_is_one_hot_argmax(self):
+        x = th.eye(6, dtype=th.float)  # one row per ATOM_PREDICATES index, in order
+        colours = initial_colours_atom(x)
+        self.assertEqual(colours.dtype, th.long)
+        self.assertTrue(th.equal(colours, th.tensor([0, 1, 2, 3, 4, 5], dtype=th.long)))
+
+    def test_initial_colours_atom_rejects_non_one_hot_row(self):
+        x = th.tensor([[1, 1, 0, 0, 0, 0]], dtype=th.float)
+        with self.assertRaises(ValueError):
+            initial_colours_atom(x)
+
+    def test_edge_labels_atom_shared_argument_bitmask(self):
+        """adjacent(l1,l2) and adjacent(l2,l1) each have BOTH their arguments shared with
+        the other (l1,l2) <-> (l2,l1): position-1 of one equals position-2 of the other,
+        and vice versa - Horcik's Def. 2 therefore gives that atom-atom edge BOTH the
+        (1,2) and (2,1) labels at once (atoms_to_graph's np.maximum.at merge, not two
+        separate parallel edges). edge_labels_atom must produce a bitmask distinguishing
+        that combination (6 = bit1|bit2) from either label alone (2, 4) - argmax would
+        collapse it to just one of them, discarding real structure."""
+        atoms = [
+            ("location", (0,)),
+            ("location", (1,)),
+            ("adjacent", (0, 1)),
+            ("adjacent", (1, 0)),
+        ]
+        node_feats, edge_feats, edge_index = _atoms_to_graph(atoms)
+        edge_attr = th.as_tensor(edge_feats, dtype=th.float)
+        labels = edge_labels_atom(edge_attr)
+        pairs = {
+            (int(edge_index[0, e]), int(edge_index[1, e])): int(labels[e])
+            for e in range(edge_index.shape[1])
+        }
+
+        # adjacent(0,1) [row 2] <-> adjacent(1,0) [row 3]: both (1,2) and (2,1) fire
+        self.assertEqual(pairs[(2, 3)], 6)
+        self.assertEqual(pairs[(3, 2)], 6)
+        self.assertNotEqual(pairs[(2, 3)], 2)  # not just bit1 ((1,2) alone)
+        self.assertNotEqual(pairs[(2, 3)], 4)  # not just bit2 ((2,1) alone)
+
+        # location0 [row 0] <-> adjacent(0,1) [row 2]: only (1,1) fires (both pos-1 == 0)
+        self.assertEqual(pairs[(0, 2)], 1)
+        self.assertEqual(pairs[(2, 0)], 1)
+
+    def test_edge_labels_atom_rejects_non_binary_value(self):
+        edge_attr = th.tensor([[0.5, 0, 0, 0]], dtype=th.float)
+        with self.assertRaises(ValueError):
+            edge_labels_atom(edge_attr)
+
+    def test_edge_labels_atom_rejects_all_zero_row(self):
+        edge_attr = th.tensor([[0, 0, 0, 0]], dtype=th.float)
+        with self.assertRaises(ValueError):
+            edge_labels_atom(edge_attr)
 
 
 class TestHandVerifiedRefinement(unittest.TestCase):

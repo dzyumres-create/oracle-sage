@@ -154,7 +154,7 @@ import torch as th
 import sage.domains.gym_taxi  # noqa: F401  (registers the gym env ids)
 from sage.domains.gym_taxi import REWARDS
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
-from sage.domains.gym_taxi.utils.representations import env_to_graph, env_to_vilg_graph
+from sage.domains.gym_taxi.utils.representations import env_to_graph, env_to_vilg_graph, env_to_atom_graph
 from sage.domains.utils.wl_colours import OOV_SIGNATURE, freeze_vocab, wl_colours
 
 # The exact config behind Oracle-SAGE's real Taxi training env-name,
@@ -189,17 +189,22 @@ def extract_graph_tensors(sim, graph_convention="oracle_sage"):
     """
     Reads a live sim's current graph as (x, edge_index, edge_attr) torch
     tensors, via whichever translator matches `graph_convention`:
-    env_to_graph (oracle_sage) or env_to_vilg_graph (vilg) - both now return
-    a 7-tuple with trailing wl_colours/wl_histogram fields (see
+    env_to_graph (oracle_sage) or env_to_vilg_graph (vilg) - both return a
+    7-tuple with trailing wl_colours/wl_histogram fields (see
     representations.py), discarded here either way since this module
-    recomputes wl_colours itself, in growing mode, below.
+    recomputes wl_colours itself, in growing mode, below - or
+    env_to_atom_graph (atom), which returns a plain 5-tuple (the atom
+    convention's GNN path carries no WL fields at all; WL is only ever
+    attached decoder-side, see representations.py's attach_wl).
 
     :param sim: a TaxiWorldSimulator instance (env.sim)
-    :param graph_convention: "oracle_sage" (default) or "vilg"
+    :param graph_convention: "oracle_sage" (default), "vilg", or "atom"
     :return: (x, edge_index, edge_attr) torch tensors
     """
     if graph_convention == "vilg":
         node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_vilg_graph(sim)
+    elif graph_convention == "atom":
+        node_feats, edge_feats, edge_index_np, _, _ = env_to_atom_graph(sim)
     else:
         node_feats, edge_feats, edge_index_np, _, _, _, _ = env_to_graph(sim)
     x = th.as_tensor(node_feats, dtype=th.float)
@@ -260,9 +265,9 @@ def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATI
     :param scenario: `GraphTaxiEnv` scenario key (default SCENARIO="city",
         the real training config - see module docstring for why other
         values might be used for a diagnostic comparison)
-    :param graph_convention: "oracle_sage" (default, unchanged behaviour) or
-        "vilg" - selects both the GraphTaxiEnv construction and the
-        translator/wl_colours decoder pair to use throughout.
+    :param graph_convention: "oracle_sage" (default, unchanged behaviour),
+        "vilg", or "atom" - selects both the GraphTaxiEnv construction and
+        the translator/wl_colours decoder pair to use throughout.
     :return: total number of graphs sampled (and folded into `vocab`)
     """
     np.random.seed(seed)
@@ -320,13 +325,28 @@ def _decode_signature(encoded):
     raise ValueError(f"unknown encoded signature kind: {kind!r}")
 
 
-def save_vocab(vocab, path):
-    """Saves `vocab` to `path` as JSON - see the module docstring for the encoding scheme."""
+def save_vocab(vocab, path, graph_convention, num_iterations):
+    """
+    Saves `vocab` to `path` as JSON - see the module docstring for the encoding scheme.
+    Also records `graph_convention`/`num_iterations` (L) as top-level metadata: a
+    vocab's colour ids are only meaningful for the exact convention+L it was built
+    with, and wl_vocab_cache.validate_wl_vocab_metadata (used by both
+    configure_wl_vocab_override and WLPlanFeedbackPolicy._load_vocab) checks this
+    metadata on load, so a mismatched vocab raises loudly instead of silently
+    producing wrong-but-valid embedding lookups. Vocab files saved before this
+    metadata existed have neither key - validate_wl_vocab_metadata tolerates that for
+    oracle_sage/vilg (never for "atom", which is new enough to always require it).
+    """
     entries = [
         {"signature": _encode_signature(signature), "id": colour_id}
         for signature, colour_id in vocab.items()
     ]
-    payload = {"vocab_size": len(vocab), "entries": entries}
+    payload = {
+        "vocab_size": len(vocab),
+        "graph_convention": graph_convention,
+        "num_iterations": num_iterations,
+        "entries": entries,
+    }
     with open(path, "w") as f:
         json.dump(payload, f)
 
@@ -369,10 +389,11 @@ def main():
              "non-oracle_sage --graph-convention)",
     )
     parser.add_argument(
-        "--graph-convention", default="oracle_sage", choices=["oracle_sage", "vilg"],
+        "--graph-convention", default="oracle_sage", choices=["oracle_sage", "vilg", "atom"],
         help="graph construction convention to sample from (default: oracle_sage, unchanged "
              "behaviour). 'vilg' constructs GraphTaxiEnv(graph_convention='vilg') and reads "
-             "graphs via env_to_vilg_graph instead of env_to_graph.",
+             "graphs via env_to_vilg_graph instead of env_to_graph; 'atom' likewise via "
+             "env_to_atom_graph.",
     )
     args = parser.parse_args()
     out_path = args.out if args.out is not None else str(default_out_path(args.scenario, args.num_iterations, args.graph_convention))
@@ -390,7 +411,7 @@ def main():
         graph_convention=args.graph_convention,
     )
     vocab_size = freeze_vocab(vocab)
-    save_vocab(vocab, out_path)
+    save_vocab(vocab, out_path, graph_convention=args.graph_convention, num_iterations=args.num_iterations)
     elapsed = time.time() - start
 
     print(f"sampled {total_graphs} graphs from scenario={args.scenario!r} graph_convention={args.graph_convention!r} "

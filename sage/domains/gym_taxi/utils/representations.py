@@ -20,7 +20,7 @@ import scipy.sparse as sp
 import torch as th
 from torch_geometric.data import Data, Batch
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
-from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations
+from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations, is_wl_override_configured
 from sage.domains.utils.representations import graph_to_json, json_default, EMB_SIZE
 from sage.domains.utils.wl_colours import wl_colours
 import networkx as nx
@@ -460,9 +460,12 @@ def env_to_atom_graph(env):
     al., AAAI-25, Def. 2) -- see atoms_to_graph for the encoding itself. Returns the same
     5-tuple shape as env_to_graph (node_feats, edge_feats, edge_index, mask,
     global_feats) -- no WL colours. Unlike this branch's env_to_graph/env_to_vilg_graph
-    (which do compute WL -- see wl_colours.py), WL for the atom convention is
-    deliberately not wired here yet: it will be computed decoder-side, inside
-    json_to_atom_graph after atoms_to_graph, in a later change -- not in this function.
+    (which always compute WL -- see wl_colours.py), WL for the atom convention is
+    deliberately NOT computed here: it is attached decoder-side instead (attach_wl,
+    called from json_to_atom_graph after atoms_to_graph, and from the atom planner's
+    _atoms_to_projection) -- so this function, and therefore the atom GNN baseline (no
+    --wl-vocab-path) that calls it directly, never carries WL fields at all, regardless
+    of whether WL is configured elsewhere in the process.
 
     Only env.planning=True is implemented: mask is True on type-atom rows only (exactly
     rows 0..n_obj-1 -- see env_to_atoms), matching the "every object is a legal action
@@ -524,6 +527,55 @@ def atoms_to_json(atoms, global_feats):
     )
 
 
+def attach_wl(data, graph_convention="atom"):
+    """
+    Attaches wl_colours ([N]) and wl_histogram ([1, V]) to a single, UNBATCHED
+    torch_geometric Data in place, in frozen mode, using whichever vocab/L is currently
+    active (wl_vocab_cache.get_wl_vocab()/get_wl_num_iterations()) -- mutated and
+    returned (for chaining), mirroring json_to_graph's own per-graph attachment shapes
+    exactly (sage/domains/utils/representations.py): wl_colours is left [N_i] (NOT
+    unsqueezed) and wl_histogram is unsqueezed to [1, V] BEFORE Batch.from_data_list, so
+    that after batching Batch.from_data_list's default dim-0 concatenation produces the
+    same [N_total] / [B, V] shapes json_to_graph already does for oracle_sage/vilg -- see
+    Step 0's investigation of that mechanism. This is the ONE place atom-convention WL
+    is computed; both call sites below (json_to_atom_graph, after atoms_to_graph; and
+    the atom planner's _atoms_to_projection, sage/domains/gym_taxi/simulator/
+    planner.py) call this SAME function so they cannot independently drift.
+
+    No-op (returns `data` unchanged, no wl_colours/wl_histogram attribute at all) when
+    no WL vocab override is configured (wl_vocab_cache.is_wl_override_configured() is
+    False): unlike oracle_sage/vilg, which always compute WL via a fallback default
+    vocab, the atom convention has no meaningful default vocab to fall back to, so WL
+    stays off for atom until a caller has explicitly opted in via
+    --wl-vocab-path/--wl-num-iterations (or a direct configure_wl_vocab_override()
+    call) -- the atom GNN baseline (env_to_atom_graph, json_to_atom_graph/
+    _atoms_to_projection with no override configured) is therefore completely
+    unaffected by this function's existence.
+
+    Device-safe: wl_colours() (via refine()) builds every tensor it returns on
+    node_colours.device (see wl_colours.py), so `data.x`'s device propagates straight
+    through to wl_colours/wl_histogram -- no explicit .to(device) needed here, and this
+    works identically for a CPU or CUDA `data`.
+
+    :param data: a single (unbatched) torch_geometric.data.Data with .x/.edge_index/
+        .edge_attr already populated (e.g. from atoms_to_graph)
+    :param graph_convention: passed through to wl_colours() -- "atom" (the default) for
+        both call sites this is used from
+    :return: `data`, mutated in place (also returned so callers can chain e.g.
+        `data.append(attach_wl(d))`)
+    """
+    if not is_wl_override_configured():
+        return data
+    wl_colour_ids, wl_histogram = wl_colours(
+        data.x, data.edge_index, data.edge_attr,
+        num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
+        graph_convention=graph_convention,
+    )
+    data.wl_colours = wl_colour_ids
+    data.wl_histogram = wl_histogram.unsqueeze(0)
+    return data
+
+
 def json_to_atom_graph(js):
     """
     Converter for the atom convention's compact JSON format (atoms_to_json): rebuilds
@@ -540,6 +592,11 @@ def json_to_atom_graph(js):
     numpy arrays (see its own docstring), so -- unlike json_to_graph's plain-Python-list
     inputs, which pick up torch's default dtype (float32) automatically -- the float32
     cast here must be explicit, or x/edge_attr would silently come out float64 instead.
+
+    Each per-env `d` is passed through attach_wl(d) before batching -- a no-op unless a
+    WL vocab override is configured (see attach_wl), in which case wl_colours/
+    wl_histogram end up on the returned Batch in exactly the shapes json_to_graph's own
+    wl-aware path produces ([N_total] / [B, V]).
 
     :param js: list of json objects representing vector of environments (same calling
         convention as json_to_graph: each element indexable as `j[0]` for the JSON string)
@@ -561,6 +618,7 @@ def json_to_atom_graph(js):
         )
         d.mask = th.as_tensor(mask, dtype=th.bool)
         d.global_features = th.as_tensor(env["global_feats"], dtype=th.float32).unsqueeze(0)
+        attach_wl(d)
         data.append(d)
     return Batch.from_data_list(data)
 

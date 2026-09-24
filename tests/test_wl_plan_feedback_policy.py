@@ -12,26 +12,37 @@ Run from the repo root with:
 """
 import unittest
 
+import json
+import os
+import tempfile
+
 import numpy as np
 import torch as th
+import gym as gym_module
 
 # Importing build_wl_vocab (not otherwise used here) applies its numpy/gym
 # compatibility shims as an import side effect - needed to construct a
 # "city" (random_walls=True) GraphTaxiEnv at all in this sandbox's drifted
 # gym/numpy. See build_wl_vocab.py's own docstring for why. The production
 # code under test does NOT depend on this - only this test harness does.
-import sage.domains.utils.build_wl_vocab  # noqa: F401
+from sage.domains.utils.build_wl_vocab import sample_graphs, save_vocab
 
 from copy import deepcopy
 
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.representations import env_to_json
 from sage.domains.gym_taxi.simulator.planner import Planner, graph_to_networkx
+from sage.domains.gym_taxi.utils.wl_vocab_cache import configure_wl_vocab_override, reset_wl_vocab_override
 from sage.domains.utils.representations import json_to_graph
+from sage.domains.utils.wl_colours import freeze_vocab
+from sage.domains.utils import spaces as sage_spaces
 from sage.agent.graph_policy import GNNExtractor, EMB_SIZE
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy, WLEmbeddingExtractor
 from sage.agent.graph_feedback_policy import PathValueNet
+from sage.agent.plan_feedback_a2c import PlanFeedback_A2C
+from sage.agent.async_vec_env import AsyncVecEnv
+from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_vec_env
 from torch_geometric.data import Batch
 
 
@@ -446,6 +457,74 @@ class TestPathValueNetOptimizerTiming(unittest.TestCase):
         actions, values, log_prob, explored, plans = policy.forward(obs)
         self.assertIsNotNone(actions)
         self.assertFalse(th.isnan(values).any())
+
+
+class TestWLPlanFeedbackPolicyOnAtomBatch(unittest.TestCase):
+    """WLPlanFeedbackPolicy.forward() on a real atom-convention batch, on whichever
+    device SB3's device="auto" resolves to (CPU here, CUDA on RCP) - same template as
+    tests/test_atom_planner_device.py's TestPolicyForwardPassOnAvailableDevice (the GNN
+    atom baseline's own device smoke test), but the WL policy, atom convention, and a
+    real WL vocab override configured instead of the GNN-only path."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
+        vocab = {}
+        sample_graphs(
+            vocab, episodes=3, steps_per_episode=30, num_iterations=1, seed=6001,
+            scenario="predictable5", graph_convention="atom", log_every=10 ** 9,
+        )
+        freeze_vocab(vocab)
+        save_vocab(vocab, self.vocab_path, graph_convention="atom", num_iterations=1)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+        reset_wl_vocab_override()
+
+    def test_forward_runs_end_to_end_chosen_action_is_type_atom_row(self):
+        configure_wl_vocab_override(self.vocab_path, 1, graph_convention="atom")
+
+        def make_env():
+            return GraphTaxiEnv(representation="graph", scenario="predictable5", mask=False, graph_convention="atom")
+
+        env = make_vec_env(
+            make_env, n_envs=1, seed=0,
+            monitor_kwargs={"info_keywords": ("len100", "len200")}, vec_env_cls=AsyncVecEnv,
+        )
+
+        policy_kwargs = {
+            "optimizer_class": th.optim.AdamW, "optimizer_kwargs": {"weight_decay": 0.0001},
+            "ortho_init": False,
+            "exploration_initial_eps": 0.0, "exploration_final_eps": 0.0, "exploration_fraction": 0.0,
+            "shared_gnn": True,
+            "layer_norm": False,
+            "num_planning_choices": 3,
+            "features_extractor_kwargs": {"gnn_steps": 5},
+            "wl_vocab_path": self.vocab_path,
+            "wl_num_iterations": 1,
+            "graph_convention": "atom",
+        }
+        model = PlanFeedback_A2C(
+            WLPlanFeedbackPolicy, env, verbose=0, device="auto",
+            supported_action_spaces=(sage_spaces.BinaryAction, gym_module.spaces.Discrete, sage_spaces.Autoregressive),
+            n_steps=5, policy_kwargs=policy_kwargs,
+        )
+        device = model.device
+
+        obs = env.reset()
+        actions, values, log_prob, explored, plans = model.policy.forward(obs)
+
+        self.assertEqual(actions.device.type, device.type)
+        self.assertFalse(th.isnan(values).any())
+
+        # the chosen action must be a type-atom row (mask==True on it), not a
+        # proposition row - decode the SAME raw observation the policy just acted on
+        # (not env internals) to get the independent ground-truth object count
+        payload = json.loads(obs[0][0])
+        n_obj = sum(1 for entry in payload["atoms"] if entry[0] in (0, 1, 2))  # location/taxi/passenger
+        self.assertLess(int(actions.item()), n_obj)
+
+        env.close()
 
 
 if __name__ == "__main__":
