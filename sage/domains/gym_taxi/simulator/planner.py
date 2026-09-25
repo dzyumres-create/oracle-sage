@@ -494,7 +494,7 @@ def _atoms_to_projection(atoms, reference_graph):
     )
     projection.mask = th.as_tensor(mask, dtype=th.bool, device=device)
     projection.global_features = reference_graph.global_features.clone()
-    attach_wl(projection)
+    attach_wl(projection, site="planner")
     return projection
 
 

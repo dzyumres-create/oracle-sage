@@ -22,7 +22,8 @@ from torch_geometric.data import Data, Batch
 from sage.domains.gym_taxi.utils.config import LOCS, PREDICTABLE5
 from sage.domains.gym_taxi.utils.wl_vocab_cache import get_wl_vocab, get_wl_num_iterations, is_wl_override_configured
 from sage.domains.utils.representations import graph_to_json, json_default, EMB_SIZE
-from sage.domains.utils.wl_colours import wl_colours
+from sage.domains.utils.wl_colours import wl_colours, OOV_SIGNATURE
+from sage.forks.stable_baselines3.stable_baselines3.common import logger as sb3_logger
 import networkx as nx
 import cv2
 
@@ -527,7 +528,7 @@ def atoms_to_json(atoms, global_feats):
     )
 
 
-def attach_wl(data, graph_convention="atom"):
+def attach_wl(data, graph_convention="atom", site=None):
     """
     Attaches wl_colours ([N]) and wl_histogram ([1, V]) to a single, UNBATCHED
     torch_geometric Data in place, in frozen mode, using whichever vocab/L is currently
@@ -557,22 +558,42 @@ def attach_wl(data, graph_convention="atom"):
     through to wl_colours/wl_histogram -- no explicit .to(device) needed here, and this
     works identically for a CPU or CUDA `data`.
 
+    `site` (e.g. "decoder"/"planner", one per call site below) turns on a runtime OOV
+    counter: `logger.record_mean(f"wl_atom/oov_fraction_{site}", ...)`, the fraction of
+    THIS graph's nodes that resolved to vocab[OOV_SIGNATURE] -- the SAME logger.record_mean
+    pattern graph_plan_feedback_policy.py already uses for action_selection/* (a module-
+    level SB3 logger; safe to call outside a real training run too, and surfaces
+    automatically at whatever --log-interval the training loop is already using, with no
+    further wiring). Purely a side-effect READ of the just-computed wl_colour_ids (via
+    .item(), no in-place mutation) -- never changes data.wl_colours/.wl_histogram or
+    anything else attach_wl returns, so passing (or omitting) `site` cannot affect any
+    computed value, only whether this one extra metric gets logged. None (the default)
+    skips it entirely, e.g. for callers (build_wl_vocab.py-style diagnostics) that call
+    wl_colours() directly rather than through this function and so never reach here.
+
     :param data: a single (unbatched) torch_geometric.data.Data with .x/.edge_index/
         .edge_attr already populated (e.g. from atoms_to_graph)
     :param graph_convention: passed through to wl_colours() -- "atom" (the default) for
         both call sites this is used from
+    :param site: if given, logs this call's OOV fraction under
+        f"wl_atom/oov_fraction_{site}" (see above); None (default) logs nothing
     :return: `data`, mutated in place (also returned so callers can chain e.g.
         `data.append(attach_wl(d))`)
     """
     if not is_wl_override_configured():
         return data
+    vocab = get_wl_vocab()
     wl_colour_ids, wl_histogram = wl_colours(
         data.x, data.edge_index, data.edge_attr,
-        num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
+        num_iterations=get_wl_num_iterations(), vocab=vocab, frozen=True,
         graph_convention=graph_convention,
     )
     data.wl_colours = wl_colour_ids
     data.wl_histogram = wl_histogram.unsqueeze(0)
+    if site is not None:
+        oov_id = vocab[OOV_SIGNATURE]
+        oov_fraction = (wl_colour_ids == oov_id).float().mean().item()
+        sb3_logger.record_mean(f"wl_atom/oov_fraction_{site}", oov_fraction)
     return data
 
 
@@ -618,7 +639,7 @@ def json_to_atom_graph(js):
         )
         d.mask = th.as_tensor(mask, dtype=th.bool)
         d.global_features = th.as_tensor(env["global_feats"], dtype=th.float32).unsqueeze(0)
-        attach_wl(d)
+        attach_wl(d, site="decoder")
         data.append(d)
     return Batch.from_data_list(data)
 

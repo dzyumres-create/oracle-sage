@@ -34,6 +34,7 @@ from sage.domains.gym_taxi.utils.representations import (
     env_to_atom_graph,
     env_to_atom_json,
     json_to_atom_graph,
+    attach_wl,
 )
 from sage.domains.gym_taxi.utils.wl_vocab_cache import (
     configure_wl_vocab_override,
@@ -162,6 +163,45 @@ class TestNoWlFieldsWithoutOverride(unittest.TestCase):
         batch = json_to_atom_graph([[js]])
         self.assertFalse(hasattr(batch, "wl_colours"))
         self.assertFalse(hasattr(batch, "wl_histogram"))
+
+
+class TestAttachWlSiteLoggingDoesNotChangeOutputs(unittest.TestCase):
+    """The `site` param (runtime OOV logging, see attach_wl's docstring) must be a pure
+    side effect: passing it (or not), or which tag it's given, must never change
+    data.wl_colours/.wl_histogram -- only whether/where a metric gets logged."""
+
+    L = 1
+    SEED = 4003
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
+        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, steps_per_episode=30, num_iterations=self.L)
+        configure_wl_vocab_override(self.vocab_path, self.L, graph_convention="atom")
+
+    def tearDown(self):
+        reset_wl_vocab_override()
+        self._tmpdir.cleanup()
+
+    def _fresh_data(self, sim):
+        node_feats, edge_feats, edge_index, mask, global_feats = env_to_atom_graph(sim)
+        return Data(
+            x=th.as_tensor(node_feats, dtype=th.float32),
+            edge_index=th.as_tensor(edge_index, dtype=th.long),
+            edge_attr=th.as_tensor(edge_feats, dtype=th.float32),
+        )
+
+    def test_site_none_vs_decoder_vs_planner_produce_identical_wl_fields(self):
+        sim = make_sim(self.SEED, **PREDICTABLE5)
+
+        d_none = attach_wl(self._fresh_data(sim), site=None)
+        d_decoder = attach_wl(self._fresh_data(sim), site="decoder")
+        d_planner = attach_wl(self._fresh_data(sim), site="planner")
+        d_unknown = attach_wl(self._fresh_data(sim), site="some_other_tag")
+
+        for other in (d_decoder, d_planner, d_unknown):
+            self.assertTrue(th.equal(other.wl_colours, d_none.wl_colours))
+            self.assertTrue(th.equal(other.wl_histogram, d_none.wl_histogram))
 
 
 class TestPlannerProjectionMatchesExecutedEnv(unittest.TestCase):
