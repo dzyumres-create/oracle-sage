@@ -471,7 +471,7 @@ class TestWLPlanFeedbackPolicyOnAtomBatch(unittest.TestCase):
         self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
         vocab = {}
         sample_graphs(
-            vocab, episodes=3, steps_per_episode=30, num_iterations=1, seed=6001,
+            vocab, episodes=3, sample_every=30, num_iterations=1, seed=6001,
             scenario="predictable5", graph_convention="atom", log_every=10 ** 9,
         )
         freeze_vocab(vocab)

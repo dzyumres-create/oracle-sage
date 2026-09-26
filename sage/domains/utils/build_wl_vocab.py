@@ -100,7 +100,9 @@ where `<encoded>` is a small tagged JSON object - see `_encode_signature` /
 `_decode_signature` below for the exact (and inverse) encoding.
 """
 import argparse
+import copy
 import json
+import subprocess
 import time
 from pathlib import Path
 
@@ -341,38 +343,156 @@ def to_planner_data(sim, graph_convention="oracle_sage"):
     return d
 
 
-def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATIONS, seed=0, log_every=100, scenario=SCENARIO, graph_convention="oracle_sage"):
+def epsilon_greedy_action(sim, G, eps, rng):
     """
-    Resets/steps through the Taxi environment (see MASK/REWARDS_VARIANT
-    above, and `scenario` below), running growing-mode wl_colours on the
-    graph sampled after every step, accumulating into the shared `vocab`.
+    greedy_action, but with probability `eps` a uniformly-random legal action
+    (sample_action) is taken instead - so a corpus built from this policy isn't
+    entirely confined to the greedy policy's own on-path states (which are a narrow,
+    systematically-biased slice of the reachable state space: always making progress
+    towards a delivery, never "wasted" moves, never far from a passenger/destination).
+
+    :param sim: a TaxiWorldSimulator instance (env.sim)
+    :param G: this episode's road_graph(sim)
+    :param eps: exploration probability, in [0, 1]
+    :param rng: a numpy RandomState, used ONLY for the eps coin-flip (kept separate
+        from sample_action's own bare `np.random.choice` calls, which read the global
+        numpy random state - so this doesn't perturb sample_action's own reproducibility
+        contract for callers that also seed the global state directly)
+    :return: a valid node id to pass to env.step()
+    """
+    if rng.random_sample() < eps:
+        return sample_action(sim)
+    return greedy_action(sim, G)
+
+
+def run_full_episode_states(env, sample_every, graph_convention, policy, goals_per_state, rng, max_steps=2500):
+    """
+    Runs ONE episode from env's CURRENT state (caller is responsible for env.reset()
+    and any env.seed() beforehand - this does not seed or reset anything itself, so a
+    caller can run many consecutive episodes off one continuously-advancing seeded
+    env), to its NATURAL end (city's own timeout=2000 or delivery_limit, surfaced as
+    `done=True` from env.step()) - capped at `max_steps` as a safety net only, not the
+    normal stopping condition. Yields a live state every `sample_every` simulator
+    steps (not every step - consecutive states differ by one action and are highly
+    autocorrelated), tagged with its step-in-episode depth, followed by up to
+    `goals_per_state` Planner.plan() projections from that SAME state (same depth tag)
+    - real, structurally distinct states a planner-feedback policy actually
+    encounters, not just live-stepped ones (goals_per_state=0 disables this cleanly).
+
+    :param env: a live GraphTaxiEnv, already reset (and seeded, if reproducibility is
+        wanted) by the caller
+    :param sample_every: yield a state every this many simulator steps
+    :param graph_convention: "oracle_sage", "vilg", or "atom"
+    :param policy: callable(sim, road_graph) -> action (e.g. sample_action wrapped to
+        take the unused road_graph arg, greedy_action, or epsilon_greedy_action
+        partially applied)
+    :param goals_per_state: number of random legal candidate goals to also project via
+        Planner.plan() at each sampled state (0 disables projections entirely)
+    :param rng: a numpy RandomState, used for goal selection (kept separate from the
+        `policy`'s own randomness source, whatever that is)
+    :param max_steps: hard cap, in case `done` is somehow never returned
+    :yield: (step, x, edge_index, edge_attr) - one for the live state, then one per
+        projected goal, all sharing the same `step` (the live state's depth, not the
+        hypothetical post-projection depth - a projection is a one-step lookahead FROM
+        this depth, not a state actually reached at a deeper step)
+    """
+    G = road_graph(env.sim)
+    planner = Planner(graph_convention=graph_convention) if goals_per_state > 0 else None
+
+    for step in range(max_steps):
+        if step % sample_every == 0:
+            data = to_planner_data(env.sim, graph_convention=graph_convention)
+            yield step, data.x, data.edge_index, data.edge_attr
+
+            if goals_per_state > 0:
+                selectable = data.mask.nonzero(as_tuple=True)[0].tolist()
+                n_goals = min(goals_per_state, len(selectable))
+                if n_goals > 0:
+                    for goal in rng.choice(selectable, size=n_goals, replace=False):
+                        projection, _actions = planner.plan(copy.deepcopy(data), int(goal))
+                        yield step, projection.x, projection.edge_index, projection.edge_attr
+
+        a = policy(env.sim, G)
+        _, _, done, _ = env.step(a)
+        if done:
+            break
+
+
+def sample_graphs(
+    vocab, episodes, sample_every, num_iterations=NUM_ITERATIONS, seed=0, log_every=100,
+    scenario=SCENARIO, graph_convention="oracle_sage", eps=0.2, goals_per_state=2, max_steps=2500,
+):
+    """
+    Builds a vocab from `episodes` FULL episodes (run to natural termination - city's
+    own timeout/delivery_limit, NOT stopped early after a fixed step count), sampling a
+    state every `sample_every` simulator steps and running growing-mode wl_colours on
+    it - plus `goals_per_state` Planner.plan() projections per sampled state - to
+    accumulate into the shared `vocab`. Replaces the old short-episode-reset design
+    (every episode capped at a fixed step count, uniform-random actions only, no
+    projections): that design only ever sampled the first ~50-60 steps of any episode
+    and never the deep states a real, long-running training episode (city's episodes
+    run to their ~2000-step timeout - see docs/cell6_wl_diagnostics.md) actually
+    reaches, which measurably undercounted real-world OOV by an order of magnitude at
+    depth.
+
+    Policy mix: the first half of `episodes` use epsilon_greedy_action (mostly the
+    nearest-passenger-then-destination greedy policy, with probability `eps` a random
+    legal action instead, so sampled states aren't confined to the greedy policy's own
+    narrow on-path slice); the second half use sample_action (uniformly random legal
+    actions) throughout - deliberately not epsilon-mixed itself, so the corpus also
+    contains genuinely exploratory trajectories the greedy-biased half systematically
+    avoids (e.g. states reached by "wasted" moves, or far from any passenger).
+
+    env.seed(seed) is called ONCE, before the first episode - env.reset() (called once
+    per episode by this function) then advances the SAME seeded generator, so the
+    entire sequence of `episodes` mazes/passenger-spawns is deterministic and
+    reproducible from `seed` alone (the old version never called env.seed() at all,
+    so - despite accepting a `seed` argument - its mazes were driven by whatever
+    unseeded OS entropy BaseTaxiEnv.__init__ auto-seeds itself with at construction,
+    not by that argument).
 
     :param vocab: signature -> colour id, mutated in place (growing mode)
-    :param episodes: number of env.reset() episodes
-    :param steps_per_episode: number of random-action steps per episode
+    :param episodes: number of FULL episodes (not env.reset() calls capped at a fixed
+        step count)
+    :param sample_every: sample (and grow the vocab from) a state every this many
+        simulator steps within each episode
     :param num_iterations: WL refinement iterations per sampled graph
-    :param seed: seed for the random action sampling
-    :param log_every: print a (graph count, vocab size) checkpoint every
-        this many sampled graphs, so growth-rate trends are visible in the
-        console output rather than only a single before/after number
-    :param scenario: `GraphTaxiEnv` scenario key (default SCENARIO="city",
-        the real training config - see module docstring for why other
-        values might be used for a diagnostic comparison)
-    :param graph_convention: "oracle_sage" (default, unchanged behaviour),
-        "vilg", or "atom" - selects both the GraphTaxiEnv construction and
-        the translator/wl_colours decoder pair to use throughout.
+    :param seed: seeds BOTH env.seed(seed) (mazes/spawns) and this function's own
+        goal-selection RandomState - genuinely reproducible and, when disjoint from
+        another call's seed, genuinely disjoint (unlike the old version)
+    :param log_every: print a (graph count, vocab size) checkpoint every this many
+        TOTAL sampled graphs (live states + projections combined)
+    :param scenario: `GraphTaxiEnv` scenario key (default SCENARIO="city")
+    :param graph_convention: "oracle_sage" (default), "vilg", or "atom"
+    :param eps: exploration probability for the greedy half's epsilon_greedy_action
+    :param goals_per_state: planner-projected candidate goals sampled per visited state
+    :param max_steps: safety cap per episode (city's own timeout=2000 already ends
+        episodes via `done=True` well before this at the default)
     :return: total number of graphs sampled (and folded into `vocab`)
     """
+    env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT, graph_convention=graph_convention)
+    env.seed(seed)
+    # sample_action (used by both the random-action half AND epsilon_greedy_action's
+    # eps branch) reads numpy's GLOBAL random state directly (np.random.choice), not
+    # `rng` below - seeding it here too is required for full reproducibility, on top of
+    # env.seed(seed) for maze/spawn generation and `rng` for goal-projection selection.
     np.random.seed(seed)
+    rng = np.random.RandomState(seed)
+
     total_graphs = 0
     last_checkpoint_size = len(vocab)
+    half = episodes // 2
 
-    env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT, graph_convention=graph_convention)
-    for _ in range(episodes):
+    for ep in range(episodes):
         env.reset()
-        for _ in range(steps_per_episode):
-            x, edge_index, edge_attr = extract_graph_tensors(env.sim, graph_convention=graph_convention)
+        if ep < half:
+            policy = lambda sim, G: epsilon_greedy_action(sim, G, eps, rng)
+        else:
+            policy = lambda sim, G: sample_action(sim)
 
+        for step, x, edge_index, edge_attr in run_full_episode_states(
+            env, sample_every, graph_convention, policy, goals_per_state, rng, max_steps=max_steps,
+        ):
             wl_colours(
                 x, edge_index, edge_attr,
                 num_iterations=num_iterations, vocab=vocab, frozen=False,
@@ -384,11 +504,6 @@ def sample_graphs(vocab, episodes, steps_per_episode, num_iterations=NUM_ITERATI
                 delta = len(vocab) - last_checkpoint_size
                 print(f"  graphs={total_graphs:>6}  vocab_size={len(vocab):>6}  (+{delta} since last checkpoint)")
                 last_checkpoint_size = len(vocab)
-
-            action = sample_action(env.sim)
-            _, _, done, _ = env.step(action)
-            if done:
-                env.reset()
 
     return total_graphs
 
@@ -418,7 +533,16 @@ def _decode_signature(encoded):
     raise ValueError(f"unknown encoded signature kind: {kind!r}")
 
 
-def save_vocab(vocab, path, graph_convention, num_iterations):
+def _git_commit():
+    """Best-effort `git rev-parse HEAD`; returns None (not a placeholder string) if git
+    is unavailable or this isn't a git checkout, so metadata never claims a fake commit."""
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return None
+
+
+def save_vocab(vocab, path, graph_convention, num_iterations, build_procedure=None):
     """
     Saves `vocab` to `path` as JSON - see the module docstring for the encoding scheme.
     Also records `graph_convention`/`num_iterations` (L) as top-level metadata: a
@@ -429,6 +553,12 @@ def save_vocab(vocab, path, graph_convention, num_iterations):
     producing wrong-but-valid embedding lookups. Vocab files saved before this
     metadata existed have neither key - validate_wl_vocab_metadata tolerates that for
     oracle_sage/vilg (never for "atom", which is new enough to always require it).
+
+    :param build_procedure: optional dict describing HOW this vocab's corpus was
+        built (episodes, sample_every, eps, seed, goals_per_state, policy mix, git
+        commit) - recorded as-is under the "build_procedure" key, purely for
+        provenance/reproducibility (never read back by validate_wl_vocab_metadata or
+        any loader); omitted entirely when None, so old callers/readers are unaffected.
     """
     entries = [
         {"signature": _encode_signature(signature), "id": colour_id}
@@ -440,6 +570,8 @@ def save_vocab(vocab, path, graph_convention, num_iterations):
         "num_iterations": num_iterations,
         "entries": entries,
     }
+    if build_procedure is not None:
+        payload["build_procedure"] = build_procedure
     with open(path, "w") as f:
         json.dump(payload, f)
 
@@ -454,13 +586,29 @@ def load_vocab(path):
     return vocab
 
 
+def load_vocab_with_metadata(path):
+    """Like `load_vocab`, but also returns the raw metadata dict (graph_convention,
+    num_iterations, vocab_size, build_procedure if present) alongside it - useful for
+    measure-only tooling that needs to know what convention/L a saved vocab was built
+    for, rather than having the caller re-supply (and risk mismatching) that by hand."""
+    with open(path) as f:
+        payload = json.load(f)
+    vocab = {}
+    for entry in payload["entries"]:
+        vocab[_decode_signature(entry["signature"])] = entry["id"]
+    metadata = {k: v for k, v in payload.items() if k != "entries"}
+    return vocab, metadata
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Build a frozen WL-colour vocab for the Taxi domain by sampling a live GraphTaxiEnv."
     )
-    parser.add_argument("--episodes", type=int, default=20)
-    parser.add_argument("--steps-per-episode", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--episodes", type=int, default=20, help="number of FULL episodes to run (not step-capped)")
+    parser.add_argument("--sample-every", type=int, default=50, help="sample a state every this many simulator steps within each episode")
+    parser.add_argument("--seed", type=int, default=0, help="seeds env.seed() (mazes/spawns) and goal selection")
+    parser.add_argument("--eps", type=float, default=0.2, help="exploration probability for the greedy half of episodes")
+    parser.add_argument("--goals-per-state", type=int, default=2, help="planner-projected candidate goals sampled per visited state (0 disables projections)")
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument(
         "--scenario", default=SCENARIO,
@@ -496,19 +644,35 @@ def main():
     total_graphs = sample_graphs(
         vocab,
         episodes=args.episodes,
-        steps_per_episode=args.steps_per_episode,
+        sample_every=args.sample_every,
         num_iterations=args.num_iterations,
         seed=args.seed,
         log_every=args.log_every,
         scenario=args.scenario,
         graph_convention=args.graph_convention,
+        eps=args.eps,
+        goals_per_state=args.goals_per_state,
     )
     vocab_size = freeze_vocab(vocab)
-    save_vocab(vocab, out_path, graph_convention=args.graph_convention, num_iterations=args.num_iterations)
+    build_procedure = {
+        "episodes": args.episodes,
+        "sample_every": args.sample_every,
+        "eps": args.eps,
+        "goals_per_state": args.goals_per_state,
+        "seed": args.seed,
+        "policy_mix": "first half of episodes: epsilon_greedy_action (eps as above); "
+                      "second half: sample_action (uniform random legal actions)",
+        "full_episodes": True,
+        "git_commit": _git_commit(),
+    }
+    save_vocab(
+        vocab, out_path, graph_convention=args.graph_convention, num_iterations=args.num_iterations,
+        build_procedure=build_procedure,
+    )
     elapsed = time.time() - start
 
     print(f"sampled {total_graphs} graphs from scenario={args.scenario!r} graph_convention={args.graph_convention!r} "
-          f"({args.episodes} episodes x {args.steps_per_episode} steps each), L={args.num_iterations}")
+          f"({args.episodes} full episodes, sample_every={args.sample_every}), L={args.num_iterations}")
     print(f"vocab_size (frozen, includes OOV) = {vocab_size}")
     print(f"wrote {out_path}")
     print(f"elapsed: {elapsed:.1f}s")

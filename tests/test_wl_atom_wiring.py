@@ -45,10 +45,10 @@ from sage.domains.gym_taxi.utils.wl_vocab_cache import (
 from sage.domains.utils.wl_colours import freeze_vocab, wl_colours
 
 
-def build_atom_vocab(path, seed, episodes, steps_per_episode, num_iterations, scenario="predictable5"):
+def build_atom_vocab(path, seed, episodes, sample_every, num_iterations, scenario="predictable5"):
     vocab = {}
     sample_graphs(
-        vocab, episodes=episodes, steps_per_episode=steps_per_episode,
+        vocab, episodes=episodes, sample_every=sample_every,
         num_iterations=num_iterations, seed=seed, scenario=scenario,
         graph_convention="atom", log_every=10 ** 9,
     )
@@ -84,7 +84,7 @@ class TestDecoderMatchesDirectSameCorpusVocab(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
-        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, steps_per_episode=30, num_iterations=self.L)
+        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, sample_every=30, num_iterations=self.L)
         configure_wl_vocab_override(self.vocab_path, self.L, graph_convention="atom")
 
     def tearDown(self):
@@ -122,7 +122,7 @@ class TestDecoderMatchesDirectDifferentCorpusVocabWithOov(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
         # deliberately tiny + a different scenario than the test graph below
-        build_atom_vocab(self.vocab_path, seed=self.BUILD_SEED, episodes=1, steps_per_episode=3, num_iterations=self.L, scenario="predictable5")
+        build_atom_vocab(self.vocab_path, seed=self.BUILD_SEED, episodes=1, sample_every=3, num_iterations=self.L, scenario="predictable5")
         configure_wl_vocab_override(self.vocab_path, self.L, graph_convention="atom")
 
     def tearDown(self):
@@ -176,7 +176,7 @@ class TestAttachWlSiteLoggingDoesNotChangeOutputs(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
-        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, steps_per_episode=30, num_iterations=self.L)
+        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, sample_every=30, num_iterations=self.L)
         configure_wl_vocab_override(self.vocab_path, self.L, graph_convention="atom")
 
     def tearDown(self):
@@ -215,7 +215,7 @@ class TestPlannerProjectionMatchesExecutedEnv(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.vocab_path = os.path.join(self._tmpdir.name, "vocab.json")
-        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, steps_per_episode=30, num_iterations=self.L)
+        build_atom_vocab(self.vocab_path, seed=self.SEED, episodes=3, sample_every=30, num_iterations=self.L)
         configure_wl_vocab_override(self.vocab_path, self.L, graph_convention="atom")
 
     def tearDown(self):

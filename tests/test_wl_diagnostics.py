@@ -117,10 +117,16 @@ class TestToPlannerData(unittest.TestCase):
 
 class TestRunDepthCheckpoints(unittest.TestCase):
     def test_returns_checkpoint_history_matching_log_every(self):
-        corpus = collect_graph_corpus("predictable5", episodes=1, steps_per_episode=25, seed=1, graph_convention="oracle_sage")
+        """collect_graph_corpus now runs FULL episodes (sampling every `sample_every`
+        steps) rather than stopping after a fixed step count, so the corpus size is no
+        longer a literal function of (episodes, sample_every) alone (predictable5's
+        episodes end via its own timeout/delivery_limit) - derive the expected
+        checkpoint steps from the corpus's own actual length instead of hardcoding one."""
+        corpus = collect_graph_corpus("predictable5", episodes=1, sample_every=5, seed=1, graph_convention="oracle_sage")
         vocab, checkpoints = run_depth(corpus, num_iterations=1, log_every=10, graph_convention="oracle_sage")
-        self.assertEqual(len(checkpoints), 2)  # 25 graphs, log_every=10 -> checkpoints at 10, 20
-        self.assertEqual([g for g, _v in checkpoints], [10, 20])
+        expected_steps = list(range(10, len(corpus) + 1, 10))
+        self.assertGreaterEqual(len(expected_steps), 2)
+        self.assertEqual([g for g, _v in checkpoints], expected_steps)
         # vocab sizes are non-decreasing (growing mode never shrinks)
         sizes = [v for _g, v in checkpoints]
         self.assertEqual(sizes, sorted(sizes))
@@ -130,15 +136,21 @@ class TestRunDepthCheckpoints(unittest.TestCase):
 class TestCollectPolicyCorpus(unittest.TestCase):
     def test_includes_more_graphs_than_live_states_alone(self):
         """Corpus includes both live states AND planner projections - with
-        goals_per_state > 0, the corpus must be strictly larger than
-        episodes*steps_per_episode (the live-state-only count)."""
-        n_states = 2 * 15
-        corpus = collect_policy_corpus("predictable5", episodes=2, steps_per_episode=15, seed=2, graph_convention="oracle_sage", goals_per_state=2)
+        goals_per_state > 0, the corpus must be strictly larger than the same seed's
+        live-state-only count (goals_per_state=0)."""
+        n_states = len(collect_policy_corpus("predictable5", episodes=2, sample_every=15, seed=2, graph_convention="oracle_sage", goals_per_state=0))
+        corpus = collect_policy_corpus("predictable5", episodes=2, sample_every=15, seed=2, graph_convention="oracle_sage", goals_per_state=2)
         self.assertGreater(len(corpus), n_states)
 
-    def test_zero_goals_per_state_gives_exactly_live_states(self):
-        corpus = collect_policy_corpus("predictable5", episodes=2, steps_per_episode=10, seed=2, graph_convention="oracle_sage", goals_per_state=0)
-        self.assertEqual(len(corpus), 20)
+    def test_zero_goals_per_state_gives_only_live_states(self):
+        """goals_per_state=0 disables planner projections entirely - the corpus must be
+        non-empty (episodes actually ran) but strictly smaller than the same seed's
+        corpus with projections enabled (covered by the sibling test above); here we
+        just check it's non-empty and never larger than the projected version."""
+        corpus = collect_policy_corpus("predictable5", episodes=2, sample_every=10, seed=2, graph_convention="oracle_sage", goals_per_state=0)
+        self.assertGreater(len(corpus), 0)
+        corpus_with_projections = collect_policy_corpus("predictable5", episodes=2, sample_every=10, seed=2, graph_convention="oracle_sage", goals_per_state=2)
+        self.assertGreaterEqual(len(corpus_with_projections), len(corpus))
 
 
 class TestMeasureHeldOutOov(unittest.TestCase):
@@ -146,7 +158,7 @@ class TestMeasureHeldOutOov(unittest.TestCase):
         """Sanity/positive control: measuring OOV against the EXACT corpus a vocab was
         grown (then frozen) from must give 0% - every signature in it is, by
         construction, already in the vocab."""
-        corpus = collect_graph_corpus("predictable5", episodes=1, steps_per_episode=30, seed=5, graph_convention="oracle_sage")
+        corpus = collect_graph_corpus("predictable5", episodes=1, sample_every=30, seed=5, graph_convention="oracle_sage")
         vocab, _checkpoints = run_depth(corpus, num_iterations=1, log_every=10 ** 9, graph_convention="oracle_sage")
         freeze_vocab(vocab)
         fraction, total, oov = measure_held_out_oov(corpus, vocab, num_iterations=1, graph_convention="oracle_sage")
@@ -155,10 +167,10 @@ class TestMeasureHeldOutOov(unittest.TestCase):
         self.assertGreater(total, 0)
 
     def test_oov_fraction_in_valid_range(self):
-        corpus_a = collect_graph_corpus("predictable5", episodes=1, steps_per_episode=10, seed=6, graph_convention="oracle_sage")
+        corpus_a = collect_graph_corpus("predictable5", episodes=1, sample_every=10, seed=6, graph_convention="oracle_sage")
         vocab, _ = run_depth(corpus_a, num_iterations=2, log_every=10 ** 9, graph_convention="oracle_sage")
         freeze_vocab(vocab)
-        corpus_b = collect_graph_corpus("predictable5", episodes=1, steps_per_episode=10, seed=999_999, graph_convention="oracle_sage")
+        corpus_b = collect_graph_corpus("predictable5", episodes=1, sample_every=10, seed=999_999, graph_convention="oracle_sage")
         fraction, total, oov = measure_held_out_oov(corpus_b, vocab, num_iterations=2, graph_convention="oracle_sage")
         self.assertGreaterEqual(fraction, 0.0)
         self.assertLessEqual(fraction, 1.0)

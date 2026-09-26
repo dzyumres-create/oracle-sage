@@ -31,23 +31,30 @@
    B-random but not B-policy (or vice versa) is a real, actionable finding about WHERE
    the frozen vocab's blind spots are, that a single pooled number would hide.
 
-   `GraphTaxiEnv`/`MASK`/`REWARDS_VARIANT`/`sample_action`/`road_graph`/`next_hop`/
-   `greedy_action`/`to_planner_data`/`extract_graph_tensors`/`Planner` are imported
-   directly from build_wl_vocab.py rather than duplicated here - this also means
-   build_wl_vocab.py's numpy/gym compat shims (see its docstring) run automatically as
-   an import side effect, so this script needs none of its own.
+   `GraphTaxiEnv`/`MASK`/`REWARDS_VARIANT`/`sample_action`/`greedy_action`/
+   `run_full_episode_states` are imported directly from build_wl_vocab.py rather than
+   duplicated here - this also means build_wl_vocab.py's numpy/gym compat shims (see
+   its docstring) run automatically as an import side effect, so this script needs
+   none of its own. `run_full_episode_states` is also where env.seed()/full-episode/
+   Planner-projection logic now lives, shared with build_wl_vocab.sample_graphs - see
+   its docstring for why (episode-depth undercounting of real-world OOV).
+
+   Depth-bucketed held-out OOV (BUCKETS below) is the standard report as of Cell 6's
+   "near-zero OOV at every depth of full-length training episodes" standard: a flat/
+   pooled OOV number hides that OOV climbs steeply with episode depth, since shallow
+   states are otherwise over-represented relative to how a real ~2000-step training
+   episode actually spends its time.
 
 Run from the repo root: python -m sage.domains.utils.wl_depth_sweep --help
 """
 import argparse
-import copy
 import time
 
 import numpy as np
 
 from sage.domains.utils.build_wl_vocab import (
-    GraphTaxiEnv, MASK, REWARDS_VARIANT, sample_action, extract_graph_tensors,
-    road_graph, next_hop, greedy_action, to_planner_data, Planner,
+    GraphTaxiEnv, MASK, REWARDS_VARIANT, sample_action, greedy_action, run_full_episode_states,
+    load_vocab_with_metadata,
 )
 from sage.domains.utils.wl_colours import OOV_SIGNATURE, freeze_vocab, wl_colours
 
@@ -57,94 +64,151 @@ LOG_EVERY = 100
 
 # corpus A (vocab-building) defaults - "quick pass" scale; bump via CLI for a full run
 EPISODES = 20
-STEPS_PER_EPISODE = 50
+SAMPLE_EVERY = 50
 SEED = 0
 
 # held-out corpora defaults - deliberately far outside corpus A's seed range
 HELD_OUT_SEED = 500_000
 HELD_OUT_EPISODES = 10
-HELD_OUT_STEPS_PER_EPISODE = 50
+HELD_OUT_SAMPLE_EVERY = 50
 
 POLICY_SEED = 900_000
 POLICY_EPISODES = 10
-POLICY_STEPS_PER_EPISODE = 50
+POLICY_SAMPLE_EVERY = 50
 POLICY_GOALS_PER_STATE = 3
 
+# depth-bucketed held-out OOV: the standard report as of Cell 6's "near-zero OOV at
+# every depth of full-length training episodes" standard - a flat/pooled OOV number
+# hides the fact that OOV climbs steeply with episode depth (shallow states are
+# over-represented relative to how a real ~2000-step training episode actually spends
+# its time), so bucketing by simulator-step depth is the sharper, non-misleading report.
+BUCKETS = [(0, 60), (60, 250), (250, 1000), (1000, 10 ** 9)]
 
-def collect_graph_corpus(scenario, episodes, steps_per_episode, seed, graph_convention="oracle_sage"):
+
+def bucket_of(step):
+    """Returns the (lo, hi) tuple from BUCKETS containing `step`; steps at or beyond
+    the last bucket's lo always fall in that last (open-ended) bucket."""
+    for lo, hi in BUCKETS:
+        if lo <= step < hi:
+            return (lo, hi)
+    return BUCKETS[-1]
+
+
+def collect_graph_corpus(scenario, episodes, sample_every, seed, graph_convention="oracle_sage", max_steps=2500):
     """
-    Samples a FIXED corpus of graphs from one Taxi environment, using the
-    exact same random-action stepping approach as
-    build_wl_vocab.sample_graphs - but does NOT run wl_colours during
-    collection, so the resulting corpus can be replayed identically across
+    Samples a FIXED corpus of graphs from `episodes` FULL episodes (run to natural
+    termination via build_wl_vocab.run_full_episode_states - NOT stopped early after a
+    fixed step count), sampling a state every `sample_every` simulator steps under
+    uniform-random legal actions (build_wl_vocab.sample_action) - the same sampling
+    build_wl_vocab.sample_graphs' random-action half uses. Does NOT run wl_colours
+    during collection, so the resulting corpus can be replayed identically across
     multiple L values.
+
+    env.seed(seed) is called once before the first episode, so - unlike this
+    function's previous version, which only ever seeded numpy's GLOBAL random state
+    and left the env's own maze/passenger-spawn generator on unseeded OS entropy at
+    construction - the entire sequence of `episodes` mazes/spawns is now genuinely
+    reproducible from `seed` (and genuinely disjoint from another call whose `seed`
+    differs).
 
     :param graph_convention: "oracle_sage" (default, unchanged behaviour),
         "vilg", or "atom" - selects both the GraphTaxiEnv construction and
         the translator used to read each sampled graph.
     :return: list of (x, edge_index, edge_attr) torch tensor triples, one per sampled graph
     """
-    np.random.seed(seed)
-    corpus = []
-
     env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT, graph_convention=graph_convention)
+    env.seed(seed)
+    # sample_action reads numpy's GLOBAL random state directly (np.random.choice), not
+    # `rng` below - seeding it here too is required for full reproducibility.
+    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
+
+    corpus = []
     for _ in range(episodes):
         env.reset()
-        for _ in range(steps_per_episode):
-            corpus.append(extract_graph_tensors(env.sim, graph_convention=graph_convention))
-
-            action = sample_action(env.sim)
-            _, _, done, _ = env.step(action)
-            if done:
-                env.reset()
+        for _step, x, edge_index, edge_attr in run_full_episode_states(
+            env, sample_every, graph_convention, lambda sim, G: sample_action(sim), goals_per_state=0, rng=rng, max_steps=max_steps,
+        ):
+            corpus.append((x, edge_index, edge_attr))
 
     return corpus
 
 
-def collect_policy_corpus(scenario, episodes, steps_per_episode, seed, graph_convention="oracle_sage", goals_per_state=POLICY_GOALS_PER_STATE):
+def collect_policy_corpus(scenario, episodes, sample_every, seed, graph_convention="oracle_sage", goals_per_state=POLICY_GOALS_PER_STATE, max_steps=2500):
     """
-    B-policy: greedy_action (nearest-passenger-then-destination) stepping, so pickups
-    and deliveries actually happen within the step budget - PLUS Planner.plan()
-    projections of `goals_per_state` random legal candidate goals at every visited
-    state (mirroring project_actions' own planner.plan(deepcopy(state), goal) call
-    pattern exactly - deepcopy is required here too, since the oracle_sage/vilg planner
-    branches mutate their input Data in place; see move_taxi/move_taxi_vilg).
+    B-policy: pure greedy_action (nearest-passenger-then-destination, eps=0) stepping
+    through `episodes` FULL episodes, so pickups and deliveries actually happen - PLUS
+    Planner.plan() projections of `goals_per_state` random legal candidate goals at
+    every sampled state (mirroring project_actions' own planner.plan(deepcopy(state),
+    goal) call pattern; see build_wl_vocab.run_full_episode_states for the shared
+    implementation).
 
     :return: list of (x, edge_index, edge_attr) torch tensor triples - both live-stepped
         states AND planner-projected states, NOT distinguished in the returned list (the
         caller decides how to report them; this function's job is just to sample both).
     """
-    np.random.seed(seed)
+    env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT, graph_convention=graph_convention)
+    env.seed(seed)
     rng = np.random.RandomState(seed)
+
     corpus = []
-    planner = Planner(graph_convention=graph_convention)
+    for _ in range(episodes):
+        env.reset()
+        for _step, x, edge_index, edge_attr in run_full_episode_states(
+            env, sample_every, graph_convention, greedy_action, goals_per_state, rng, max_steps=max_steps,
+        ):
+            corpus.append((x, edge_index, edge_attr))
+
+    return corpus
+
+
+def collect_bucketed_corpus(scenario, graph_convention, episodes, seed, sample_every, policy, goals_per_state, max_steps=2500):
+    """
+    Like collect_graph_corpus/collect_policy_corpus, but groups the sampled triples by
+    the LIVE state's step-in-episode depth bucket (BUCKETS) instead of returning one
+    flat list - a planner projection inherits its SOURCE state's bucket, not a
+    hypothetical post-projection depth, since a projection is a one-step lookahead
+    FROM that depth, not a state actually reached one step deeper.
+
+    :param policy: callable(sim, road_graph) -> action, e.g. `greedy_action` or
+        `lambda sim, G: sample_action(sim)`
+    :return: dict[(lo, hi)] -> list of (x, edge_index, edge_attr) triples
+    """
+    buckets = {b: [] for b in BUCKETS}
 
     env = GraphTaxiEnv(representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT, graph_convention=graph_convention)
     env.seed(seed)
-    env.reset()
-    G = road_graph(env.sim)
+    # `policy` may be sample_action, which reads numpy's GLOBAL random state directly
+    # (np.random.choice), not `rng` below - seeding it here too is required for full
+    # reproducibility (a no-op for a purely-deterministic policy like greedy_action).
+    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
 
     for _ in range(episodes):
         env.reset()
-        G = road_graph(env.sim)
-        for _ in range(steps_per_episode):
-            corpus.append(extract_graph_tensors(env.sim, graph_convention=graph_convention))
+        for step, x, edge_index, edge_attr in run_full_episode_states(
+            env, sample_every, graph_convention, policy, goals_per_state, rng, max_steps=max_steps,
+        ):
+            buckets[bucket_of(step)].append((x, edge_index, edge_attr))
 
-            data = to_planner_data(env.sim, graph_convention=graph_convention)
-            selectable = data.mask.nonzero(as_tuple=True)[0].tolist()
-            n_goals = min(goals_per_state, len(selectable))
-            goals = rng.choice(selectable, size=n_goals, replace=False) if n_goals > 0 else []
-            for goal in goals:
-                projection, _actions = planner.plan(copy.deepcopy(data), int(goal))
-                corpus.append((projection.x, projection.edge_index, projection.edge_attr))
+    return buckets
 
-            a = greedy_action(env.sim, G)
-            _, _, done, _ = env.step(a)
-            if done:
-                env.reset()
-                G = road_graph(env.sim)
 
-    return corpus
+def collect_bucketed_random_corpus(scenario, episodes, seed, sample_every, graph_convention="oracle_sage", max_steps=2500):
+    """B-random, bucketed: uniform-random legal actions throughout, no planner projections."""
+    return collect_bucketed_corpus(
+        scenario, graph_convention, episodes, seed, sample_every,
+        policy=lambda sim, G: sample_action(sim), goals_per_state=0, max_steps=max_steps,
+    )
+
+
+def collect_bucketed_policy_corpus(scenario, episodes, seed, sample_every, graph_convention="oracle_sage", goals_per_state=POLICY_GOALS_PER_STATE, max_steps=2500):
+    """B-policy, bucketed: pure greedy_action (eps=0) plus `goals_per_state` planner
+    projections per sampled state."""
+    return collect_bucketed_corpus(
+        scenario, graph_convention, episodes, seed, sample_every,
+        policy=greedy_action, goals_per_state=goals_per_state, max_steps=max_steps,
+    )
 
 
 def run_depth(corpus, num_iterations, log_every=LOG_EVERY, graph_convention="oracle_sage"):
@@ -195,23 +259,61 @@ def measure_held_out_oov(corpus, frozen_vocab, num_iterations, graph_convention=
     return fraction, total_nodes, oov_nodes
 
 
+def measure_held_out_oov_bucketed(bucketed_corpus, frozen_vocab, num_iterations, graph_convention="oracle_sage"):
+    """Applies measure_held_out_oov independently within each bucket of a
+    collect_bucketed_corpus (or collect_bucketed_random_corpus/collect_bucketed_policy_corpus)
+    result - the standard depth-bucketed report (see module docstring).
+
+    :return: dict[(lo, hi)] -> (oov_fraction, total_nodes, oov_nodes, n_graphs)
+    """
+    results = {}
+    for b, corpus in bucketed_corpus.items():
+        fraction, total_nodes, oov_nodes = measure_held_out_oov(corpus, frozen_vocab, num_iterations, graph_convention=graph_convention)
+        results[b] = (fraction, total_nodes, oov_nodes, len(corpus))
+    return results
+
+
+def print_bucketed_oov_table(results, label):
+    """Prints a `results` dict from measure_held_out_oov_bucketed as a table, in BUCKETS order."""
+    print(f"\n=== bucketed OOV: {label} ===")
+    print(f"{'bucket':>14}  {'graphs':>7}  {'nodes':>9}  {'oov_nodes':>9}  {'oov%':>8}")
+    for b in BUCKETS:
+        frac, nodes, oov, n_graphs = results[b]
+        lo, hi = b
+        bucket_label = f"{lo}-{hi if hi < 10 ** 9 else 'inf'}"
+        print(f"{bucket_label:>14}  {n_graphs:>7}  {nodes:>9}  {oov:>9}  {frac:>7.4%}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Choose L for a graph_convention by vocab-growth and held-out OOV, "
-                     "not just vocab-growth stabilisation alone."
+        description="Choose L for a graph_convention by vocab-growth and depth-bucketed "
+                     "held-out OOV (the Cell 6 standard - see module docstring); or, with "
+                     "--vocab-path, measure an already-saved frozen vocab against that same "
+                     "standard without rebuilding it (Task 2/4-style measure-only runs)."
     )
     parser.add_argument("--graph-convention", default="oracle_sage", choices=["oracle_sage", "vilg", "atom"])
     parser.add_argument("--scenario", default=SCENARIO)
-    parser.add_argument("-L", "--num-iterations", type=int, nargs="+", default=L_VALUES)
-    parser.add_argument("--seed", type=int, default=SEED, help="corpus A (vocab-building) seed")
+    parser.add_argument(
+        "-L", "--num-iterations", type=int, nargs="+", default=L_VALUES,
+        help="in --vocab-path mode, only used as a fallback for vocabs saved without "
+             "recorded num_iterations metadata (first value used); otherwise the L "
+             "values to build+measure vocabs at from corpus A.",
+    )
+    parser.add_argument(
+        "--vocab-path", default=None,
+        help="measure-only mode: load this already-frozen vocab (build_wl_vocab.save_vocab "
+             "format) instead of building one from corpus A via run_depth, and report its "
+             "depth-bucketed held-out OOV for both B-random and B-policy.",
+    )
+    parser.add_argument("--seed", type=int, default=SEED, help="corpus A (vocab-building) seed; unused in --vocab-path mode")
     parser.add_argument("--episodes", type=int, default=EPISODES)
-    parser.add_argument("--steps-per-episode", type=int, default=STEPS_PER_EPISODE)
-    parser.add_argument("--held-out-seed", type=int, default=HELD_OUT_SEED, help="B-random seed, must be disjoint from --seed")
+    parser.add_argument("--sample-every", type=int, default=SAMPLE_EVERY)
+    parser.add_argument("--held-out-seed", type=int, default=HELD_OUT_SEED, help="B-random seed, must be disjoint from --seed and --policy-seed")
     parser.add_argument("--held-out-episodes", type=int, default=HELD_OUT_EPISODES)
-    parser.add_argument("--held-out-steps-per-episode", type=int, default=HELD_OUT_STEPS_PER_EPISODE)
+    parser.add_argument("--held-out-sample-every", type=int, default=HELD_OUT_SAMPLE_EVERY)
     parser.add_argument("--policy-seed", type=int, default=POLICY_SEED, help="B-policy seed, must be disjoint from --seed and --held-out-seed")
     parser.add_argument("--policy-episodes", type=int, default=POLICY_EPISODES)
-    parser.add_argument("--policy-steps-per-episode", type=int, default=POLICY_STEPS_PER_EPISODE)
+    parser.add_argument("--policy-sample-every", type=int, default=POLICY_SAMPLE_EVERY)
     parser.add_argument("--policy-goals-per-state", type=int, default=POLICY_GOALS_PER_STATE)
     parser.add_argument("--log-every", type=int, default=LOG_EVERY)
     args = parser.parse_args(argv)
@@ -224,28 +326,43 @@ def main(argv=None):
     conv = args.graph_convention
     print(f"=== graph_convention={conv!r} scenario={args.scenario!r} ===\n")
 
-    print(f"Sampling corpus A: {args.episodes * args.steps_per_episode} graphs "
-          f"({args.episodes} episodes x {args.steps_per_episode} steps, seed={args.seed})...")
+    print(f"Sampling B-random (held-out, random-action, bucketed, FULL episodes): "
+          f"{args.held_out_episodes} episodes, sample_every={args.held_out_sample_every}, seed={args.held_out_seed}...")
     t0 = time.time()
-    corpus_a = collect_graph_corpus(args.scenario, args.episodes, args.steps_per_episode, args.seed, graph_convention=conv)
-    print(f"collected {len(corpus_a)} graphs in {time.time() - t0:.1f}s\n")
+    buckets_random = collect_bucketed_random_corpus(
+        args.scenario, args.held_out_episodes, args.held_out_seed, args.held_out_sample_every, graph_convention=conv,
+    )
+    n_random = sum(len(v) for v in buckets_random.values())
+    print(f"collected {n_random} graphs across {len(BUCKETS)} buckets in {time.time() - t0:.1f}s\n")
 
-    print(f"Sampling B-random (held-out, random-action): "
-          f"{args.held_out_episodes * args.held_out_steps_per_episode} graphs "
-          f"({args.held_out_episodes} episodes x {args.held_out_steps_per_episode} steps, seed={args.held_out_seed})...")
+    print(f"Sampling B-policy (held-out, greedy + {args.policy_goals_per_state} planner "
+          f"projections/state, bucketed, FULL episodes): {args.policy_episodes} episodes, "
+          f"sample_every={args.policy_sample_every}, seed={args.policy_seed}...")
     t0 = time.time()
-    corpus_b_random = collect_graph_corpus(args.scenario, args.held_out_episodes, args.held_out_steps_per_episode, args.held_out_seed, graph_convention=conv)
-    print(f"collected {len(corpus_b_random)} graphs in {time.time() - t0:.1f}s\n")
-
-    print(f"Sampling B-policy (held-out, greedy policy + {args.policy_goals_per_state} planner "
-          f"projections/state): up to {args.policy_episodes * args.policy_steps_per_episode * (1 + args.policy_goals_per_state)} graphs "
-          f"({args.policy_episodes} episodes x {args.policy_steps_per_episode} steps, seed={args.policy_seed})...")
-    t0 = time.time()
-    corpus_b_policy = collect_policy_corpus(
-        args.scenario, args.policy_episodes, args.policy_steps_per_episode, args.policy_seed,
+    buckets_policy = collect_bucketed_policy_corpus(
+        args.scenario, args.policy_episodes, args.policy_seed, args.policy_sample_every,
         graph_convention=conv, goals_per_state=args.policy_goals_per_state,
     )
-    print(f"collected {len(corpus_b_policy)} graphs in {time.time() - t0:.1f}s\n")
+    n_policy = sum(len(v) for v in buckets_policy.values())
+    print(f"collected {n_policy} graphs across {len(BUCKETS)} buckets in {time.time() - t0:.1f}s\n")
+
+    if args.vocab_path:
+        vocab, metadata = load_vocab_with_metadata(args.vocab_path)
+        L = metadata.get("num_iterations", args.num_iterations[0])
+        print(f"loaded vocab: path={args.vocab_path!r}  size={len(vocab)}  "
+              f"graph_convention={metadata.get('graph_convention')!r}  num_iterations={L}\n")
+
+        oov_random = measure_held_out_oov_bucketed(buckets_random, vocab, L, graph_convention=conv)
+        oov_policy = measure_held_out_oov_bucketed(buckets_policy, vocab, L, graph_convention=conv)
+        print_bucketed_oov_table(oov_random, f"{args.vocab_path} B-random")
+        print_bucketed_oov_table(oov_policy, f"{args.vocab_path} B-policy")
+        return {"vocab_path": args.vocab_path, "vocab_size": len(vocab), "L": L, "oov_random": oov_random, "oov_policy": oov_policy}
+
+    print(f"Sampling corpus A (vocab-building, FULL episodes): {args.episodes} episodes, "
+          f"sample_every={args.sample_every}, seed={args.seed}...")
+    t0 = time.time()
+    corpus_a = collect_graph_corpus(args.scenario, args.episodes, args.sample_every, args.seed, graph_convention=conv)
+    print(f"collected {len(corpus_a)} graphs in {time.time() - t0:.1f}s\n")
 
     results = {}
     for L in args.num_iterations:
@@ -256,28 +373,20 @@ def main(argv=None):
         vocab_size = freeze_vocab(vocab)
 
         t0 = time.time()
-        oov_random, n_random, oov_n_random = measure_held_out_oov(corpus_b_random, vocab, L, graph_convention=conv)
-        t0b = time.time()
-        oov_policy, n_policy, oov_n_policy = measure_held_out_oov(corpus_b_policy, vocab, L, graph_convention=conv)
+        oov_random = measure_held_out_oov_bucketed(buckets_random, vocab, L, graph_convention=conv)
+        oov_policy = measure_held_out_oov_bucketed(buckets_policy, vocab, L, graph_convention=conv)
         oov_elapsed = time.time() - t0
 
         results[L] = {
             "vocab_size": vocab_size,
             "checkpoints": checkpoints,
-            "oov_random": oov_random, "n_random": n_random, "oov_n_random": oov_n_random,
-            "oov_policy": oov_policy, "n_policy": n_policy, "oov_n_policy": oov_n_policy,
+            "oov_random": oov_random,
+            "oov_policy": oov_policy,
             "elapsed": grow_elapsed + oov_elapsed,
         }
-        print(f"L={L}: vocab_size(frozen)={vocab_size}  "
-              f"OOV[B-random]={oov_random:.4%} ({oov_n_random}/{n_random} nodes)  "
-              f"OOV[B-policy]={oov_policy:.4%} ({oov_n_policy}/{n_policy} nodes)  "
-              f"elapsed={grow_elapsed + oov_elapsed:.1f}s\n")
-
-    print("=== summary ===")
-    print(f"{'L':>3}  {'vocab_size':>10}  {'OOV[B-random]':>14}  {'OOV[B-policy]':>14}  {'elapsed':>8}")
-    for L in args.num_iterations:
-        r = results[L]
-        print(f"{L:>3}  {r['vocab_size']:>10}  {r['oov_random']:>13.4%}  {r['oov_policy']:>13.4%}  {r['elapsed']:>7.1f}s")
+        print_bucketed_oov_table(oov_random, f"L={L} B-random")
+        print_bucketed_oov_table(oov_policy, f"L={L} B-policy")
+        print(f"L={L}: vocab_size(frozen)={vocab_size}  elapsed={grow_elapsed + oov_elapsed:.1f}s\n")
 
     print("\n=== vocab growth (corpus A) ===")
     for L in args.num_iterations:
