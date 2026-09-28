@@ -362,9 +362,110 @@ depth over the same range. This is the direct evidence that elevated OOV at dept
 not translating into the policy actually confusing distinct candidate states, which is
 why OOV was demoted from a pass/fail gate to a descriptive metric (see above).
 
+## Atom L=2 training regression: L=1 comparison, colour-frequency analysis, evaluate_actions trace
+
+A real RCP training run on the atom L=2 vocab (`wl_vocab_taxi_city_atom_L2_full.json`)
+regressed badly against Cell 4 (vilg): `ep_rew_mean` ~27-28 (seeds 0, 300) vs 43.9,
+`explained_variance` stuck near 0 throughout vs 0.8 by 7,200 timesteps / 0.98 at the
+end, entropy barely dropping (5.2 vs 3.0). Two hypotheses: (a) the 105K-colour L=2
+vocab is too fine-grained for the lookup-table WL encoder to generalise, or (b) a
+training-time bug misaligns WL colours/histogram between rollout collection and the
+`evaluate_actions` gradient step. Three investigations, all pointing at (a):
+
+### L=1 vs L=2 vocab comparison
+
+Built `wl_vocab_taxi_city_atom_L1_full.json` with the **identical** corrected
+procedure (84 full city episodes, `sample_every=10`, seed 0, half epsilon-greedy
+(`eps=0.2`)/half random, `goals_per_state=2`, 50,400 graphs) — the only variable
+changed is `L`.
+
+| | L=2 (`..._L2_full.json`) | L=1 (`..._L1_full.json`) |
+|---|---:|---:|
+| vocab size (frozen) | 105,340 | 827 |
+| growth at 50K graphs | still climbing (+1,774 at last 2K-graph checkpoint) | flat (+0, +0, +7 at the last three checkpoints) |
+| OOV, B-random, deepest bucket | 2.89% | 0.0000% |
+| OOV, B-policy, deepest bucket | 3.04% | 0.0084% |
+| OOV, every other bucket | 0.15-2.91% | 0.0000-0.0017% |
+
+L=1's vocab converges almost immediately and generalises essentially perfectly;
+L=2's does not converge at this corpus scale and leaves a genuine multi-percent
+residual at every depth beyond the shallowest bucket. This is exactly the contrast
+the "too fine-grained" hypothesis predicts.
+
+### Colour-frequency / mass-coverage analysis
+
+For each vocab, on a held-out deep-episode corpus (greedy policy `eps=0` + 3
+planner-projected candidate goals/state, full city episodes, `sample_every=20`, 8
+episodes, seed 1,100,001 — disjoint from every build/OOV/collision seed used in this
+document; 3,200 graphs, shared across both atom vocabs since the underlying states are
+identical and only the vocab differs): distinct colours seen, the number of
+(mass-sorted, descending) colours needed to cover 50%/90% of total node-occurrence
+mass, and the fraction of node mass sitting on colours that appear in fewer than
+10/100 *distinct* held-out graphs — a proxy for "this colour's embedding row gets
+gradient signal from almost no states." Reported for all nodes and, separately, for
+**actionable nodes only** (each graph's own `.mask` rows — legal-action-target rows
+for oracle_sage/vilg, object/instance rows for atom; either way, the rows actually
+read out to drive the actor):
+
+| vocab | scope | distinct colours | colours for 50% mass | colours for 90% mass | mass on colours seen in <10 graphs | mass on colours seen in <100 graphs |
+|---|---|---:|---:|---:|---:|---:|
+| atom L2_full | all | 17,841 | 97 | 1,953 | 0.50% | 4.99% |
+| atom L2_full | actionable | 1,763 | 12 | 139 | 0.15% | 1.58% |
+| atom L1_full | all | 457 | 6 | 33 | 0.01% | 0.12% |
+| atom L1_full | actionable | 37 | 2 | 5 | 0.00% | 0.02% |
+| vilg Cell4 L2 | all | 386 | 6 | 29 | 0.00% | 0.11% |
+| vilg Cell4 L2 | actionable | 49 | 2 | 6 | 0.00% | 0.03% |
+| oracle_sage Cell3 L1 | all | 44 | 2 | 5 | 0.00% | 0.02% |
+| oracle_sage Cell3 L1 | actionable | 44 | 2 | 5 | 0.00% | 0.02% |
+
+Atom L=2 is a clear outlier on every column, by one to three orders of magnitude,
+including on actionable-nodes-only mass. This is a distinct failure mode from OOV:
+OOV counts nodes with genuinely *no* signature (collapsed into one undifferentiated
+colour — vilg's problem at depth, per the bucketed OOV tables above); this analysis
+instead counts nodes whose colour *is* a real, distinct vocab entry, just one so rare
+in the sampled state distribution that a plain per-colour embedding row would receive
+almost no gradient signal across training. 1.58% of actionable-node mass on colours
+seen in under 100 of 3,200 held-out graphs (and 12-139 colours already sufficient to
+cover 50-90% of all actionable mass, out of a 105,340-row table) is consistent with
+most of the atom L=2 embedding table being effectively untrained noise that the actor
+occasionally reads from — plausibly enough to explain persistently high entropy and a
+value function that never captures useful signal (explained_variance ~0).
+
+### evaluate_actions alignment trace (read-only)
+
+Traced how WL colours/histogram flow from rollout collection through SB3's
+`RolloutBuffer` into the `evaluate_actions` gradient step, specifically for atom:
+
+- `WLPlanFeedbackPolicy.evaluate_actions` (`sage/agent/graph_plan_feedback_policy.py`)
+  calls the same `self._get_latent(obs)` path as `forward()` — no separate replay
+  logic.
+- `_get_latent` → `extract_features` → `preprocess_obs` calls
+  `observation_space.converter(obs)` (i.e. `json_to_atom_graph`) **fresh on every
+  call**, both during rollout and during the gradient step. The atom observation
+  itself (`env_to_atom_json`) stores only the compact atom list + global features —
+  WL colours/histogram are never baked into the stored observation; they are computed
+  from scratch each time by `attach_wl(site="decoder")` inside `json_to_atom_graph`.
+- `attach_wl`/`wl_colours` are a pure, deterministic function of that self-contained
+  JSON blob: `frozen=True` is hardcoded (no vocab mutation at runtime), and each
+  node's WL signature sorts its neighbours' colours before hashing, so node/edge
+  iteration order never affects the result.
+- The global WL vocab override is configured exactly once, at CLI startup
+  (`sage/experiments/gnn_global.py`), and never reconfigured mid-run anywhere in the
+  live training path.
+- `RolloutBuffer.get()` draws one random permutation and applies it identically to
+  observations/actions/values/log_probs/advantages/returns — obs-action pairing is
+  never scrambled across a minibatch, and `Feedback_A2C.train()` uses a single
+  full-buffer batch (`batch_size=None`) besides.
+
+**No misalignment/desync bug found.** Every graph's WL colours are a pure function of
+a self-contained per-sample JSON blob, recomputed identically regardless of when or in
+what batch order it's read. This rules out hypothesis (b); the regression is
+attributable to (a), the vocab-granularity/generalisation problem quantified above.
+
 ## Verification
 
 Full test suite green throughout (`python -m pytest tests/ -q`): 158 passed, 5 skipped
 (CUDA-only), 216 subtests passed, 0 failed — confirmed after every code change in this
 document's scope, including the corpus-builder tooling fix (env seeding, full-episode
-sampling, policy mix, depth-bucketed OOV/collision reporting) described above.
+sampling, policy mix, depth-bucketed OOV/collision reporting) and the atom L=1 vocab
+build described above.
