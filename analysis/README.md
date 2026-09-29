@@ -147,3 +147,30 @@ need to engineer a high crossing rate across many passengers to see the effect.
   own rule to the ternary `request` predicate exactly as specified; they are not wired
   into the simulator/env/planner and cannot be, without separate implementation work
   outside this analysis task.
+
+## Part 2: Ternary Generator Collision Counter Results
+
+### 1. Counterfactual Collision Table (Real Crossed States vs. Flipped Counterfactuals)
+
+Evaluated across $n = 200$ real crossed states and their corresponding flipped counterfactuals ($A$ vs. $B$ via `flip_crossed_pairs()`).
+
+| Convention | $L=1$ | $L=2$ | $L=3$ | $L=4$ | $L=5$ |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **object** | 100% | 100% | 100% | 100% | 100% |
+| **atom** | 13% | 0% | 0% | 0% | 0% |
+| **object_atom ($\nu$ILG)** | 100% | 13% | 2% | 0% | 0% |
+
+- **Independently-Sampled States (Null Baseline):** Evaluating 2,000 independent snapshots (623 distinct states) showed 0% collisions across all layers and conventions. Because the adapter drops the taxi object to match the prototype representation, states differ across a sparse combinatorial selection of 400 location nodes, avoiding random collisions.
+- **Counterfactual Real States:** Demonstrates qualitative alignment with the synthetic prototype. The standard **object** graph remains completely blind (100% collision across all depths $L$). While the synthetic maze showed a sharp $100\% \to 0\%$ drop at $L=2$, full-city topologies exhibit slight noise: **atom** displays a 13% residual collision at $L=1$, and **object_atom ($\nu$ILG)** requires $L=4$ to fully eliminate ambiguity.
+
+---
+
+### 2. Coverage & Structural Ambiguity
+
+Analysis of $n = 1,395$ carried-passenger decision states:
+
+- **Crossed States (Buddy Present):** 58.2%
+- **Object-Encoding Ambiguous:** 58.2%
+
+**Equivalence Proof:**
+The exact parity between crossed states and object-encoding ambiguity is deterministic rather than coincidental at $k=2$. Under generator Rule 2, buddy pairs share the identical destination multiset via cyclical rotation without redraws. Whenever an unboarded buddy remains present at the shared origin, its destination is guaranteed to belong to the carried passenger's destination multiset. Therefore, $\text{crossed} \implies \text{ambiguous}$ holds deterministically under this generator, with no extra non-buddy-driven ambiguity observed in this sample.
