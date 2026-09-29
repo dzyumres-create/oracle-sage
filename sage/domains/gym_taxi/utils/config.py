@@ -176,3 +176,16 @@ CITY = {
     "passenger_creation_probability": 0.1,
     "random_walls": True,
 }
+
+# Ternary-predicate variant of CITY (see ternary_taxi_world.TernaryTaxiWorldSimulator):
+# a copy of CITY plus requests_per_passenger, the number of (origin, destination)
+# request pairs each passenger and their buddy carry.
+CITY_TERNARY = {
+    "size": 20,
+    "delivery_limit": 100,
+    "concurrent_passengers": 20,
+    "timeout": 2000,
+    "passenger_creation_probability": 0.1,
+    "random_walls": True,
+    "requests_per_passenger": 2,
+}
