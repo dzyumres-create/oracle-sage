@@ -259,6 +259,20 @@ class TernaryTaxiWorldSimulator(object):
 
         return type_atoms + relational
 
+    def _get_state_json(self):
+        """
+        BaseTaxiEnv.reset() (sage/domains/gym_taxi/envs/taxi_env.py) unconditionally
+        calls self.sim._get_state_json() to build the initial observation -- unlike
+        act(), which only builds one when explicitly stepped. TaxiWorldSimulator has
+        its own _get_state_json that dispatches by graph_convention; this simulator
+        has no such dispatch (observation_fn already IS the single, convention-
+        agnostic hook -- see _ternary_observation_fn in ternary_representations.py),
+        so this is a thin shim rather than a real second code path: it exists purely
+        so BaseTaxiEnv.reset() keeps working unmodified for a ternary sim exactly as
+        it does for the old one.
+        """
+        return self.observation_fn(self)
+
     def act(self, action):
         """
         Advances the game state by one step.
@@ -269,8 +283,9 @@ class TernaryTaxiWorldSimulator(object):
         :raises KeyError: if action is a location id with no road from the taxi's
             current location (the same condition under which TaxiWorldSimulator's
             attempt_move raises KeyError), or an id that is none of the above.
-        :raises NotImplementedError: if observation_fn was never set -- this commit
-            only builds the simulator; the env-wiring commit supplies observation_fn.
+        :raises NotImplementedError: if observation_fn was never set -- a ternary
+            GraphTaxiEnv always sets it (_ternary_observation_fn); this only fires
+            for a simulator built directly, without going through the env.
         """
         reward = self._apply(action)
 

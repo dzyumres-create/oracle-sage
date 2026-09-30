@@ -27,10 +27,20 @@ class State(NamedTuple):
 
 class Planner:
 
-    def __init__(self, graph_convention="oracle_sage"):
+    def __init__(self, graph_convention="oracle_sage", ternary=False):
         self.graph_convention = graph_convention
+        # Set only by GraphTaxiEnv for a ternary-domain observation space -- the
+        # ternary planner does not exist yet (decision 5). Default False preserves
+        # every existing call site (old-domain envs never pass this) byte-for-byte.
+        self.ternary = ternary
 
     def plan(self,graph,goal):
+        if self.ternary:
+            raise NotImplementedError(
+                f"Planner.plan is not implemented for the ternary domain "
+                f"(graph_convention={self.graph_convention!r}) -- the ternary planner "
+                f"does not exist yet."
+            )
         if self.graph_convention == "atom":
             return plan_atom(graph, goal)
         if self.graph_convention == "vilg":

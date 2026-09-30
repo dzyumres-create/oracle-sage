@@ -40,6 +40,13 @@ ENVS = {
     "city-taxi-unmasked-": {"representation": "graph", "scenario": "city", "mask":False},
 }
 
+# The ternary-predicate domain -- a separate dict (never folded into ENVS), fed through
+# the same multi_register_graph machinery below. Same registration pattern, mask and
+# rewards as city-taxi-unmasked-, scenario CITY_TERNARY (via SCENARIOS["city_ternary"]).
+TERNARY_ENVS = {
+    "city-taxi-ternary-unmasked-": {"representation": "graph", "scenario": "city_ternary", "mask": False, "ternary": True},
+}
+
 LEGACY_ENVS = {"city-taxi-image-": "BoxTaxiEnv"}
 
 def multi_register(envs, rewards):
@@ -60,4 +67,5 @@ def multi_register_graph(envs, rewards):
 register(id="discrete-taxi-v0", entry_point="sage.domains.gym_taxi.envs:DiscreteTaxiEnv")
 
 multi_register_graph(ENVS, REWARDS)
+multi_register_graph(TERNARY_ENVS, REWARDS)
 multi_register(LEGACY_ENVS,REWARDS)

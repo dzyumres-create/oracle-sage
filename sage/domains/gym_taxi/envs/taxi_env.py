@@ -17,6 +17,7 @@ from ast import literal_eval as make_tuple
 from gym import error, spaces, utils
 from gym.utils import seeding
 from sage.domains.gym_taxi.simulator.taxi_world import TaxiWorldSimulator, ACTIONS, TaxiWorldSimulatorImage
+from sage.domains.gym_taxi.simulator.ternary_taxi_world import TernaryTaxiWorldSimulator
 from sage.domains.gym_taxi.simulator.planner import Planner
 from sage.domains.utils.spaces import JsonGraph
 from sage.domains.gym_taxi.utils.spaces import Json
@@ -24,6 +25,12 @@ from sage.domains.utils.representations import (
     json_to_graph,
 )
 from sage.domains.gym_taxi.utils.representations import json_to_atom_graph
+from sage.domains.gym_taxi.utils.ternary_representations import (
+    TERNARY_GRAPH_CONVENTIONS,
+    TERNARY_GRAPH_CONVENTION_CONVERTERS,
+    TERNARY_JSON_WIDTH,
+    _ternary_observation_fn,
+)
 from sage.domains.gym_taxi.utils.config import (
     MAP,
     MAX_EPISODE_LENGTH,
@@ -38,7 +45,8 @@ from sage.domains.gym_taxi.utils.config import (
     PREDICTABLE5,
     PREDICTABLE10,
     PREDICTABLE15,
-    CITY
+    CITY,
+    CITY_TERNARY,
 )
 from matplotlib import pyplot as plt
 
@@ -83,6 +91,7 @@ SCENARIOS = {
     "predictable10": PREDICTABLE10,
     "predictable15": PREDICTABLE15,
     "city": CITY,
+    "city_ternary": CITY_TERNARY,
 }
 
 
@@ -571,10 +580,18 @@ class JsonTaxiEnv(BaseTaxiEnv):
 
 
 class GraphTaxiEnv(BaseTaxiEnv):
-    def __init__(self, representation, scenario, mask=False, rewards=None, graph_convention="oracle_sage"):
-        if graph_convention not in GRAPH_CONVENTIONS:
+    def __init__(self, representation, scenario, mask=False, rewards=None, graph_convention="oracle_sage", ternary=False):
+        # `ternary` selects the ternary-predicate domain (TernaryTaxiWorldSimulator,
+        # TERNARY_GRAPH_CONVENTIONS/TERNARY_GRAPH_CONVENTION_CONVERTERS/TERNARY_JSON_WIDTH)
+        # instead of the old domain's own dicts, which are never re-keyed or edited --
+        # default False means every existing (old-domain) registration/construction is
+        # byte-for-byte unaffected. Must be set before super().__init__(), which calls
+        # _init_simulator() before this method continues.
+        self.ternary = ternary
+        conventions = TERNARY_GRAPH_CONVENTIONS if ternary else GRAPH_CONVENTIONS
+        if graph_convention not in conventions:
             raise ValueError(
-                f"invalid graph_convention {graph_convention!r}; expected one of {sorted(GRAPH_CONVENTIONS)}"
+                f"invalid graph_convention {graph_convention!r}; expected one of {sorted(conventions)}"
             )
         self.rewards = rewards
         self.scenario = SCENARIOS[scenario]
@@ -582,17 +599,31 @@ class GraphTaxiEnv(BaseTaxiEnv):
         self.graph_convention = graph_convention
         super().__init__()
         #image = _construct_image(representation, scenario)
-        node_dimension, edge_dimension = GRAPH_CONVENTIONS[graph_convention]
+        node_dimension, edge_dimension = conventions[graph_convention]
+        if ternary:
+            converter = TERNARY_GRAPH_CONVENTION_CONVERTERS[graph_convention]
+            width = TERNARY_JSON_WIDTH
+        else:
+            converter = GRAPH_CONVENTION_CONVERTERS[graph_convention]
+            width = GRAPH_CONVENTION_JSON_WIDTH[graph_convention]
         self.observation_space = JsonGraph(
-            converter=GRAPH_CONVENTION_CONVERTERS[graph_convention],node_dimension=node_dimension,edge_dimension=edge_dimension,
-            planner=Planner(graph_convention=self.graph_convention),
-            width=GRAPH_CONVENTION_JSON_WIDTH[graph_convention],
+            converter=converter,node_dimension=node_dimension,edge_dimension=edge_dimension,
+            planner=Planner(graph_convention=self.graph_convention, ternary=ternary),
+            width=width,
         )
         self.first = True
         if scenario == "original":
             self.action_space = spaces.Discrete(ORIGINAL_ACTION_COUNT)
 
     def _init_simulator(self):
+        if self.ternary:
+            return TernaryTaxiWorldSimulator(
+                self.np_random,
+                **self.scenario,
+                rewards=self.rewards,
+                planning= not self.mask,
+                observation_fn=_ternary_observation_fn,
+            )
         return TaxiWorldSimulator(
             self.np_random,
             **self.scenario,
@@ -651,6 +682,13 @@ class GraphTaxiEnv(BaseTaxiEnv):
         )
 
     def render(self, mode="human"):
+        if self.ternary:
+            raise NotImplementedError(
+                "GraphTaxiEnv.render() is not implemented for the ternary domain -- "
+                "convert_to_human()/json_to_image() decode the old expanded image "
+                "wire format, which is incompatible with the ternary domain's compact "
+                "facts-JSON observation (see _ternary_observation_fn)."
+            )
 
         img, fuel, money = self.convert_to_human(self.sim._get_state_json())
         if self.first:

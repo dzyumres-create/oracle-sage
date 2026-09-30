@@ -24,14 +24,13 @@
    the SAME dtypes those old builders use: node_feats/edge_feats/global_feats
    float64, edge_index int64, mask bool. This is NOT what a torch consumer wants
    directly -- json_to_atom_graph (representations.py:482-520) already establishes
-   the pattern this module's own (future, NOT written here -- see decision 3) policy-
-   side wrapper must follow: explicit `th.as_tensor(..., dtype=th.float32)` /
-   `dtype=th.long` casts, exactly because these numpy arrays are float64/int64, not
-   float32/int64 -- unlike json_to_graph's plain-Python-list JSON round trip, which
-   gets float32 "for free" from torch's default dtype on python float lists. There is
-   no such free ride here: whatever eventually decodes facts_to_json's wire format
-   into a torch_geometric Data/Batch must cast explicitly, the same way
-   json_to_atom_graph already does. That wrapper is the wiring commit, not this one.
+   the pattern the policy-side wrapper below follows: explicit
+   `th.as_tensor(..., dtype=th.float32)` / `dtype=th.long` casts, exactly because
+   these numpy arrays are float64/int64, not float32/int64 -- unlike json_to_graph's
+   plain-Python-list JSON round trip, which gets float32 "for free" from torch's
+   default dtype on python float lists. There is no such free ride here:
+   json_to_ternary_graph_object/_vilg/_atom (bottom of this module) cast explicitly,
+   the same way json_to_atom_graph already does.
 
    Every converter validates its input via _validate_facts before doing anything else
    (see its docstring): malformed input raises immediately, it is never silently
@@ -43,6 +42,8 @@ import json
 
 import numpy as np
 import scipy.sparse as sp
+import torch as th
+from torch_geometric.data import Data, Batch
 
 from sage.domains.utils.representations import EMB_SIZE, json_default
 
@@ -510,10 +511,102 @@ def json_to_facts(s):
     return facts, decoded["meta"]
 
 
-# (node_dimension, edge_dimension) per ternary graph-construction convention. NOT wired
-# into taxi_env.py's GRAPH_CONVENTIONS yet -- that is a separate wiring commit.
+# (node_dimension, edge_dimension) per ternary graph-construction convention. Deliberately
+# a SEPARATE dict from taxi_env.py's own GRAPH_CONVENTIONS (never re-keyed into it) --
+# GraphTaxiEnv selects between the two dicts (and their matching converters/width) by its
+# own `ternary` flag, so the old domain's dict/behaviour stays byte-identical.
 TERNARY_GRAPH_CONVENTIONS = {
     "oracle_sage": (3, 10),
     "vilg": (10, 3),
     "atom": (7, 9),
+}
+
+# JsonGraph's string-observation width for the ternary domain -- a single constant, not
+# one per convention like GRAPH_CONVENTION_JSON_WIDTH: facts_to_json's wire format is the
+# SAME for every convention (the convention only matters on the decode side), so there is
+# only one JSON size to bound. Measured max over 5 seeds x up to 2000 steps on
+# CITY_TERNARY: ~19,580 chars (tests/test_ternary_representations.py's
+# test_max_json_length_over_5_seeds_full_episodes) -- comfortably under this, same ~13x
+# headroom the old domain's shared 250000 default gives oracle_sage/vilg/atom.
+TERNARY_JSON_WIDTH = 250000
+
+
+# ==========================================================================================
+# Env-side observation hook and policy-side decoders -- the wiring commit
+# ==========================================================================================
+
+def _ternary_observation_fn(sim):
+    """
+    TernaryTaxiWorldSimulator.observation_fn (decision 3): serialises facts()+meta,
+    identically regardless of graph_convention -- the convention only matters on the
+    DECODE side (json_to_ternary_graph_object/_vilg/_atom below). A plain MODULE-LEVEL
+    function, not a lambda or closure: TernaryTaxiWorldSimulator instances (and
+    therefore this callback) must be picklable for AsyncVecEnv's multiprocessing (used
+    whenever --planner is set), and lambdas/closures are not.
+
+    :param sim: a TernaryTaxiWorldSimulator (this is exactly env.act()'s own
+        `self.observation_fn(self)` call -- see ternary_taxi_world.py)
+    :return: JSON string (facts_to_json's wire format)
+    """
+    meta = {"time": sim.time, "timeout": sim.timeout, "planning": sim.planning}
+    return facts_to_json(sim.facts(), meta)
+
+
+def _ternary_json_to_data(js, facts_to_graph_fn):
+    """
+    Shared body for json_to_ternary_graph_object/_vilg/_atom: decodes one convention's
+    worth of compact-facts JSON into a torch_geometric Batch, following
+    json_to_atom_graph's exact pattern (representations.py:482-520) -- same batching,
+    same explicit float32/long casts (facts_to_*_graph returns float64/int64 numpy,
+    per this module's own contract; there is no free dtype ride here the way
+    json_to_graph's plain-Python-list path gets), same
+    global_features.unsqueeze(0)-per-graph-then-batch shape.
+
+    :param js: list of json objects representing a vector of environments (same
+        calling convention as json_to_graph/json_to_atom_graph: each element indexable
+        as `j[0]`)
+    :param facts_to_graph_fn: facts_to_object_graph / facts_to_vilg_graph / facts_to_atom_graph
+    :return: Batch
+    """
+    data = []
+    for j in js:
+        facts, meta = json_to_facts(j[0])
+        node_feats, edge_feats, edge_index, mask, global_feats = facts_to_graph_fn(facts, meta)
+        d = Data(
+            x=th.as_tensor(node_feats, dtype=th.float32),
+            edge_attr=th.as_tensor(edge_feats, dtype=th.float32),
+            edge_index=th.as_tensor(edge_index, dtype=th.long),
+        )
+        d.mask = th.as_tensor(mask, dtype=th.bool)
+        d.global_features = th.as_tensor(global_feats, dtype=th.float32).unsqueeze(0)
+        data.append(d)
+    return Batch.from_data_list(data)
+
+
+def json_to_ternary_graph_object(js):
+    """Policy-side decoder for graph_convention="oracle_sage" on the ternary domain --
+    see _ternary_json_to_data."""
+    return _ternary_json_to_data(js, facts_to_object_graph)
+
+
+def json_to_ternary_graph_vilg(js):
+    """Policy-side decoder for graph_convention="vilg" on the ternary domain -- see
+    _ternary_json_to_data."""
+    return _ternary_json_to_data(js, facts_to_vilg_graph)
+
+
+def json_to_ternary_graph_atom(js):
+    """Policy-side decoder for graph_convention="atom" on the ternary domain -- see
+    _ternary_json_to_data. facts_to_atom_graph itself raises NotImplementedError for
+    meta["planning"]=False; nothing here needs to special-case that."""
+    return _ternary_json_to_data(js, facts_to_atom_graph)
+
+
+# JsonGraph's converter (JSON string -> Batch) per ternary graph-construction convention --
+# the ternary analogue of taxi_env.py's own GRAPH_CONVENTION_CONVERTERS, kept as a
+# separate dict for the same reason TERNARY_GRAPH_CONVENTIONS is.
+TERNARY_GRAPH_CONVENTION_CONVERTERS = {
+    "oracle_sage": json_to_ternary_graph_object,
+    "vilg": json_to_ternary_graph_vilg,
+    "atom": json_to_ternary_graph_atom,
 }
