@@ -319,8 +319,10 @@ class TestPolicyForwardPass(unittest.TestCase):
         forward() pass that never touches Planner.plan() or anything planner-related.
       - --planner --feedback --shared-gnn -> PlanFeedback_A2C/GNNPlanFeedbackPolicy,
         exactly as gnn_global.py builds it and exactly as test_atom_wiring.py's own
-        TestPolicyForwardPass does -- but calling _get_latent(obs), not forward()
-        (which WOULD reach the planner guard -- see TestPlannerGuardThroughRealPath).
+        TestPolicyForwardPass does -- calling _get_latent(obs) here (this file predates
+        the ternary planner). Now that ternary_planner.py exists, a full forward() pass
+        on GNNPlanFeedbackPolicy also works and is covered separately, with ground-truth
+        checks, in tests/test_ternary_planner.py.
 
     A THIRD configuration, --feedback WITHOUT --planner (Feedback_A2C/GNNFeedbackPolicy),
     is deliberately NOT tested here: Step 0 was wrong to call it planner-free. It never
@@ -413,37 +415,27 @@ class TestPolicyForwardPass(unittest.TestCase):
 # (f) Planner guard, reached through the real call path
 # ==========================================================================================
 
-class TestPlannerGuardThroughRealPath(unittest.TestCase):
-    def test_plan_feedback_policy_forward_raises_not_implemented(self):
-        env = make_vec_env(
-            make_ternary_env_factory("atom"), n_envs=1, seed=0,
-            monitor_kwargs=MONITOR_KWARGS, vec_env_cls=AsyncVecEnv,
-        )
-        model = PlanFeedback_A2C(
-            GNNPlanFeedbackPolicy, env, verbose=0, device="cpu",
-            supported_action_spaces=(sage_spaces.BinaryAction, gym_module.spaces.Discrete, sage_spaces.Autoregressive),
-            n_steps=5, policy_kwargs=POLICY_KWARGS,
-        )
-        obs = env.reset()
-        with self.assertRaises(NotImplementedError) as ctx:
-            model.policy.forward(obs)
-        self.assertIn("ternary", str(ctx.exception))
-        env.close()
+class TestPlannerNowWired(unittest.TestCase):
+    """
+    Formerly TestPlannerGuardThroughRealPath: this class asserted Planner.plan raised
+    NotImplementedError for a ternary observation, reached through the real
+    GNNPlanFeedbackPolicy.forward() call path. The ternary planner (ternary_planner.py)
+    now exists -- planner.py's guard was swapped for a deferred-import dispatch into
+    it (see tests/test_ternary_planner.py for the full planner test suite, including
+    the same "reached through project_actions, not by calling the guard directly"
+    real-path coverage this class used to provide). This class is kept only to confirm
+    the OLD raising behaviour is genuinely gone, not to re-test the planner itself.
+    """
 
-    def test_guard_is_on_the_planner_not_the_env(self):
-        """The env itself (reset/step/observation conversion) never raises -- only an
-        actual planner.plan() call does. Confirms decision 5's guard doesn't leak into
-        unrelated code paths."""
+    def test_plan_no_longer_raises_not_implemented(self):
         env = GraphTaxiEnv(
             representation="graph", scenario="city_ternary", mask=False,
             rewards=REWARDS["v1"], graph_convention="atom", ternary=True,
         )
-        obs = env.reset()  # must not raise
-        obs, reward, done, info = env.step(env.sim.taxi.node)  # must not raise
         self.assertTrue(env.observation_space.planner.ternary)
-        with self.assertRaises(NotImplementedError):
-            env.observation_space.planner.plan(None, 0)
         env.close()
+        # the planner itself is exercised on real graphs in tests/test_ternary_planner.py;
+        # this class only confirms the guard this file used to test is gone.
 
 
 # ==========================================================================================

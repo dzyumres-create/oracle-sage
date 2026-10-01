@@ -36,11 +36,13 @@ class Planner:
 
     def plan(self,graph,goal):
         if self.ternary:
-            raise NotImplementedError(
-                f"Planner.plan is not implemented for the ternary domain "
-                f"(graph_convention={self.graph_convention!r}) -- the ternary planner "
-                f"does not exist yet."
-            )
+            # Deferred (function-local, not module-level) import: ternary_planner.py
+            # imports increment_timer FROM this module, so importing it back at this
+            # module's top level would be circular. By the time plan() is actually
+            # CALLED, this module has already finished loading, so this import always
+            # succeeds immediately.
+            from sage.domains.gym_taxi.simulator.ternary_planner import plan_ternary
+            return plan_ternary(graph, goal, self.graph_convention)
         if self.graph_convention == "atom":
             return plan_atom(graph, goal)
         if self.graph_convention == "vilg":
