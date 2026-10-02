@@ -26,8 +26,9 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 SC = os.path.join(HERE, "results", "scores")
 OUT = os.path.join(HERE, "results", "metrics")
-MODELS = ("cell1", "cell3")
-NAMES = {"cell1": "Cell 1 (GNN)", "cell3": "Cell 3 (WL)"}
+NAMES = {"cell1": "Cell 1 (GNN)", "cell3": "Cell 3 (WL)", "cell1fixed": "Cell 1-fixed (GNN, both fixes)"}
+# models with scores on disk; Cell 1-fixed is included automatically once scored
+MODELS = tuple(m for m in NAMES if os.path.exists(os.path.join(SC, f"{m}.json")))
 
 
 def load():
@@ -229,6 +230,26 @@ def main():
         lines.append(f"{NAMES[m]}: discriminator {np.mean(rs):.3f} (min {np.min(rs):.2f}); actor "
                      + (f"{np.mean(ra):.3f}" if ra else "undefined") + f"; actor probability identical across all "
                      f"passengers in {const}/{len(rs)} states; distinct actor probabilities among passengers mean {np.mean(nd):.1f}")
+    lines.append("\n### MAIN FINDING - discriminator over ALL goals (incl. non-delivering move/no-op)")
+    for m in MODELS:
+        r_all, beats, n_states_shorter = [], [], 0
+        for s in states:
+            g = gt[str(s["id"])]
+            sc = np.array(models[m][str(s["id"])]["scores"])
+            L = np.array(g["plan_len"])
+            P = [i for i, t in enumerate(g["types"]) if t == "pickup_deliver"]
+            Q = [i for i, t in enumerate(g["types"]) if t in ("move", "noop")]
+            r_all.append(spearmanr(sc, -L)[0])
+            shorter = [i for i in Q if L[i] < L[P].min()]
+            if shorter:
+                n_states_shorter += 1
+                best_p = sc[P].max()
+                beats.append(np.mean([sc[i] > best_p for i in shorter]))
+        lines.append(f"{NAMES[m]}: Spearman(score, -plan length) over all goals {np.mean(r_all):.3f}; move/no-op goals "
+                     f"with a shorter plan than the shortest passenger that outscore EVERY passenger: "
+                     f"{100 * np.mean(beats):.1f}% ({n_states_shorter} states have such goals)")
+    lines.append("-> Cell 1's discriminator ranks every goal by plan length whether or not it delivers; it only behaves "
+                 "because its actor proposes passengers almost exclusively. Cell 3's never prefers a non-delivering goal.")
     ncol = [len({json.loads(snap[str(s['id'])])['wl_colours'][i] for i, t in enumerate(gt[str(s['id'])]['types'])
                  if t == 'pickup_deliver'}) for s in states]
     lines.append(f"WL colours (L=1) among waiting passengers per state: {sorted(set(ncol))} -> Cell 3's actor cannot "

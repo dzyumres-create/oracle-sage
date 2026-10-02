@@ -15,6 +15,7 @@ Stages (driver runs them; the heavy ones sharded over 4 worker processes):
             th.max in select_action) and uniform random tie-breaking.
 
     PYTHONPATH=. python -m analysis.score_states run --cell1-zip ... --cell3-zip ... [--workers 4]
+    PYTHONPATH=. python -m analysis.score_states run-model --model cell1fixed --zip ...   (reuses snapshots/gt)
 """
 import argparse
 import hashlib
@@ -33,7 +34,9 @@ TREES = {"head": ROOT, "main": os.path.join(HERE, ".branch_src", "main")}
 STATES = os.path.join(HERE, "results", "states")
 OUT = os.path.join(HERE, "results", "scores")
 K_DRAWS = 20
-MODEL_TREE = {"cell1": "main", "cell3": "head"}
+# Cell 1-fixed (GNN, both fixes, trained on the fixed simulator) is scored on the fixed simulator
+MODEL_TREE = {"cell1": "main", "cell3": "head", "cell1fixed": "head"}
+TORCH_SEED_BASE = {"cell1": 1, "cell3": 3, "cell1fixed": 2}
 
 
 def sub(tree, *args):
@@ -147,7 +150,7 @@ def mode_model(model, zip_path, i, n, out):
         rng = np.random.RandomState(10_000 + s["id"])
         draws = []
         for k in range(K_DRAWS):
-            th.manual_seed(1_000_000 * (1 if model == "cell1" else 3) + 100 * s["id"] + k)
+            th.manual_seed(1_000_000 * TORCH_SEED_BASE[model] + 100 * s["id"] + k)
             with th.no_grad():
                 batch, _ = pol._get_latent(obs_array(o))
                 a, _, _, _ = pol._choose_node(pol.action_net, batch)
@@ -189,9 +192,26 @@ def run(args):
     print(f"total {time.time() - t0:.0f}s")
 
 
+def run_model(args):
+    """Score one additional model on the existing snapshots (e.g. Cell 1-fixed), sharded."""
+    W = args.workers
+    jobs = [(MODEL_TREE[args.model], ["model", "--model", args.model, "--zip", args.zip, "--shard", str(i), "--of", str(W),
+                                      "--out", os.path.join(OUT, f"{args.model}_{i}.json")]) for i in range(W)]
+    with ThreadPoolExecutor(W) as ex:
+        for r in ex.map(lambda j: sub(j[0], *j[1]), jobs):
+            print(r)
+    merged = {}
+    for i in range(W):
+        merged.update(json.load(open(os.path.join(OUT, f"{args.model}_{i}.json"))))
+    json.dump(merged, open(os.path.join(OUT, f"{args.model}.json"), "w"))
+    print(f"{args.model}: {len(merged)} states")
+
+
 def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="mode", required=True)
+    rm = sp.add_parser("run-model"); rm.add_argument("--model", required=True, choices=sorted(MODEL_TREE))
+    rm.add_argument("--zip", required=True); rm.add_argument("--workers", type=int, default=4)
     r = sp.add_parser("run"); r.add_argument("--cell1-zip", required=True); r.add_argument("--cell3-zip", required=True)
     r.add_argument("--workers", type=int, default=4)
     s = sp.add_parser("snapshot"); s.add_argument("--tree", required=True); s.add_argument("--out", required=True)
@@ -203,6 +223,8 @@ def main():
     a = ap.parse_args()
     if a.mode == "run":
         run(a)
+    elif a.mode == "run-model":
+        run_model(a)
     elif a.mode == "snapshot":
         mode_snapshot(a.tree, a.out)
     elif a.mode == "gt":

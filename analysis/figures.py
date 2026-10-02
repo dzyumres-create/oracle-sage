@@ -32,7 +32,7 @@ N = 20
 # reference palette (dataviz skill, references/palette.md): categorical slots 1-2, text and surface tokens
 SURFACE, INK, INK2, MUTED, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#8a8984", "#e4e3df"
 COL = {"cell1": "#2a78d6", "cell3": "#eb6834"}
-STYLE = {"cell1": "-", "cell3": (0, (4, 2))}
+STYLE = {"cell1": "-", "cell3": (0, (2.5, 2))}
 NAME = {"cell1": "Cell 1 (GNN)", "cell3": "Cell 3 (WL)"}
 
 
@@ -86,7 +86,9 @@ def draw_city(ax, o, data, g, sid, picks_by_model, meta):
     for p in waiting:
         px, py = xy(ploc[p])
         ax.scatter(px, py, s=46, color=MUTED, edgecolor=SURFACE, linewidth=1.2, zorder=3)
-    # routes of each model's modal pick
+    obstacles = [xy(ploc[p]) for p in waiting] + [xy(loc)]
+    # routes of each model's modal pick: the two models sit on opposite sides of the cell centre, and the
+    # trip leg (pickup -> destination) is shifted again so a route that doubles back stays visible
     for k, (m, picks) in enumerate(picks_by_model.items()):
         merged = Counter("noop" if g["types"][p] == "noop" else p for p in picks)
         goal, cnt = merged.most_common(1)[0]
@@ -94,24 +96,48 @@ def draw_city(ax, o, data, g, sid, picks_by_model, meta):
             ax.plot([], [], color=COL[m], ls=STYLE[m], lw=2, label=f"{NAME[m]} modal pick: no-op ({cnt}/{len(picks)})")
             continue
         _, acts = plan(o, goal)
-        pts = [xy(loc)] + [xy(a) for a in acts if 1 <= a <= N * N]
-        off = (-.12, .12)[k]
-        ax.plot([p[0] + off for p in pts], [p[1] + off for p in pts], color=COL[m], ls=STYLE[m], lw=2,
-                solid_capstyle="round", zorder=4, label=f"{NAME[m]} modal pick: {goal} ({cnt}/{len(picks)})")
+        off = (-.2, .2)[k]
+        split = acts.index(goal) if goal in acts else len(acts)  # pickup action separates the two legs
+        leg1 = [xy(loc)] + [xy(a) for a in acts[:split] if 1 <= a <= N * N]
+        leg2 = [leg1[-1]] + [xy(a) for a in acts[split:] if 1 <= a <= N * N]
+        off2 = off + (-.12, .12)[k]
+        for j, (pts, o_) in enumerate(((leg1, off), (leg2, off2))):
+            if len(pts) < 2:
+                continue
+            ax.plot([p[0] + o_ for p in pts], [p[1] + o_ for p in pts], color=COL[m], ls=STYLE[m], lw=2,
+                    solid_capstyle="butt", dash_capstyle="butt", zorder=4,
+                    label=f"{NAME[m]} modal pick: {goal} ({cnt}/{len(picks)})" if j == 0 else None)
+            obstacles += [(p[0] + o_, p[1] + o_) for p in pts]
         if goal in pdest:
             dx, dy = xy(pdest[goal])
-            ax.scatter(dx + off, dy + off, marker="s", s=60, facecolor=SURFACE, edgecolor=COL[m], linewidth=2, zorder=5)
-    # shortest and greedy
-    for s in [i for i in P if L[i] == Lstar]:
-        sx, sy = xy(ploc[s])
+            ax.scatter(dx + off2, dy + off2, marker="s", s=60, facecolor=SURFACE, edgecolor=COL[m], linewidth=2, zorder=5)
+    # shortest and greedy: ring/marks, then labels placed away from routes, passengers and each other
+    labels = {}
+    for s_ in [i for i in P if L[i] == Lstar]:
+        sx, sy = xy(ploc[s_])
         ax.scatter(sx, sy, s=230, facecolor="none", edgecolor=INK, linewidth=1.6, zorder=6)
-        ax.annotate(f"S {s}", (sx, sy), xytext=(7, 7), textcoords="offset points", fontsize=8, color=INK, zorder=7)
-        dx, dy = xy(pdest[s])
+        labels.setdefault(s_, []).append("S")
+        dx, dy = xy(pdest[s_])
         ax.scatter(dx, dy, marker="s", s=60, facecolor="none", edgecolor=INK, linewidth=1.2, ls=":", zorder=5)
     gtar = meta.get("greedy_target")
     if gtar is not None:
-        gx, gy = xy(ploc[gtar])
-        ax.annotate(f"G {gtar}", (gx, gy), xytext=(7, -11), textcoords="offset points", fontsize=8, color=INK2, zorder=7)
+        labels.setdefault(gtar, []).append("G")
+    placed = []
+    for node, tags in labels.items():
+        px, py = xy(ploc[node])
+        text = f"{'·'.join(tags)} {node}"
+        best = None
+        for cx, cy in ((.5, -.6), (.5, .9), (-2.4, -.6), (-2.4, .9), (.6, .15), (-2.5, .15)):
+            lx, ly = px + cx, py + cy
+            centre = (lx + .9, ly - .1)
+            d = min([np.hypot(centre[0] - a, centre[1] - b) for a, b in obstacles + placed] + [9])
+            inside = -.3 <= lx and lx + 1.9 <= N - .3 and -.2 <= ly - .5 and ly <= N - .3
+            if inside and (best is None or d > best[0]):
+                best = (d, lx, ly, centre)
+        _, lx, ly, centre = best
+        ax.text(lx, ly, text, fontsize=8, color=INK if "S" in tags else INK2, zorder=9, va="bottom",
+                bbox=dict(boxstyle="round,pad=0.15", facecolor=SURFACE, edgecolor="none", alpha=.9))
+        placed.append(centre)
     tx, ty = xy(loc)
     ax.scatter(tx, ty, marker="s", s=110, color=INK, edgecolor=SURFACE, linewidth=1.5, zorder=8)
     ax.annotate("taxi", (tx, ty), xytext=(-8, -14), textcoords="offset points", fontsize=8, color=INK, zorder=8)
@@ -133,31 +159,49 @@ def draw_picks(ax, g, models, sid):
     # merge the two no-op goals (taxi node and the taxi's current location) into one row, keyed "noop"
     key = lambda gg: "noop" if types[gg] == "noop" else gg
     freq = {m: Counter(key(d["pick"]) for d in models[m][sid]["draws"]) for m in COL}
-    goals = sorted(set(freq["cell1"]) | set(freq["cell3"]),
-                   key=lambda gg: -(freq["cell1"][gg] + freq["cell3"][gg]))[:8]
-    y = np.arange(len(goals))
-    h = .36
     K = len(models["cell1"][sid]["draws"])
+    plen = lambda gg: 1 if gg == "noop" else L[gg]
+    picked = set(freq["cell1"]) | set(freq["cell3"])
+    shown = set(sorted(picked, key=lambda gg: -(freq["cell1"][gg] + freq["cell3"][gg]))[:7]) | set(S)
+    goals = sorted(shown, key=lambda gg: (plen(gg), str(gg)))     # shortest plan first
+    folded = picked - shown
+    fold_p = {gg for gg in folded if gg != "noop" and types[gg] == "pickup_deliver"}
+    fold_n = folded - fold_p
+    rows = goals + (["other_p"] if fold_p else []) + (["other_n"] if fold_n else [])
+    y = np.arange(len(rows))
+    h = .36
     for k, m in enumerate(COL):
         vals = [100 * freq[m][gg] / K for gg in goals]
+        for grp in (fold_p, fold_n):
+            if grp:
+                vals.append(100 * sum(freq[m][gg] for gg in grp) / K)
+        assert abs(sum(vals) - 100) < 1e-6, (m, sum(vals))   # every draw accounted for
         ax.barh(y + (k - .5) * (h + .04), vals, height=h, color=COL[m], label=NAME[m],
                 hatch=None if m == "cell1" else "////", edgecolor=SURFACE, linewidth=0)
         for yi, v in zip(y, vals):
             if v > 0:
                 ax.text(v + 1.5, yi + (k - .5) * (h + .04), f"{v:.0f}%", va="center", fontsize=7.5, color=INK2)
-    lab = []
-    for gg in goals:
-        if gg == "noop":
-            lab.append("no-op  1 fr (no delivery)")
-            continue
-        t = types[gg].replace("pickup_deliver", "passenger")
-        extra = f"+{L[gg] - Lstar}" if types[gg] == "pickup_deliver" else "no delivery"
-        lab.append(f"{gg}  {t}  {L[gg]} fr ({extra})" + ("  [S]" if gg in S else ""))
+    lab, lab_col = [], []
+    for gg in rows:
+        if gg == "other_p":
+            lab.append(f"other passengers ({len(fold_p)})"); lab_col.append(INK)
+        elif gg == "other_n":
+            lab.append(f"other move/no-op goals ({len(fold_n)})"); lab_col.append(MUTED)
+        elif gg == "noop":
+            lab.append("no-op  1 fr (no delivery)"); lab_col.append(MUTED)
+        elif types[gg] != "pickup_deliver":
+            lab.append(f"{gg}  {types[gg]}  {L[gg]} fr (no delivery)"); lab_col.append(MUTED)
+        else:
+            lab.append(f"{gg}  passenger  {L[gg]} fr (+{L[gg] - Lstar})" + ("  [S]" if gg in S else ""))
+            lab_col.append(INK)
     ax.set_yticks(y)
-    ax.set_yticklabels(lab, fontsize=8, color=INK)
+    ax.set_yticklabels(lab, fontsize=8)
+    for t, c in zip(ax.get_yticklabels(), lab_col):
+        t.set_color(c)
     ax.invert_yaxis()
     ax.set_xlim(0, 115)
-    ax.set_xlabel("share of 20 draws picking this goal (%)", fontsize=8, color=INK2)
+    ax.set_xlabel("share of 20 draws picking this goal (%) - rows sorted by plan length, grey = no delivery",
+                  fontsize=8, color=INK2)
     ax.tick_params(axis="x", labelsize=7.5, colors=INK2)
     ax.grid(axis="x", color=GRID, lw=.6)
     ax.set_axisbelow(True)
