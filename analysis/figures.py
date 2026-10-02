@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 R = os.path.join(HERE, "results")
-OUT = os.path.join(R, "figures")
+OUT = os.path.join(HERE, "reports", "figures")  # tracked; data inputs stay in results/
 N = 20
 
 # reference palette (dataviz skill, references/palette.md): categorical slots 1-2, text and surface tokens
