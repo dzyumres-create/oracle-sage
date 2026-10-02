@@ -25,6 +25,19 @@ def make_env(seed):
     return env, obs
 
 
+def fork_env(env):
+    """Independent copy of a live env (simulator, graph, RNG, counters).
+
+    Plain deepcopy(env) fails under gym 0.26: JsonGraph subclasses Box without
+    calling Box.__init__, and Box.__setstate__ then reads the missing .low. The
+    observation space is configuration only (converter function + a stateless
+    Planner), so it is shared between copies instead of copied; everything else
+    is deep-copied in one call, which keeps env.np_random and env.sim.random the
+    same object inside the copy.
+    """
+    return deepcopy(env, {id(env.observation_space): env.observation_space})
+
+
 def obs_to_data(obs_json):
     """One observation JSON -> torch_geometric Data (single graph)."""
     from sage.domains.utils.representations import json_to_graph
