@@ -361,6 +361,58 @@ def _cluster_solutions(cluster, local_matchings, edges):
     return solutions
 
 
+def _object_cluster_solutions(graph):
+    """
+    The single place the object encoding's per-cluster hypotheses are computed:
+    decode_object, enumerate_object_hypotheses and object_hypothesis_count all read
+    from this, so "ambiguous" (a cluster with more than one valid hypothesis) has one
+    definition shared by the planner and the env-side diagnostic.
+
+    :return: (type_atoms, base_relational, cluster_solutions) -- cluster_solutions is a
+        list of (cluster passenger-id list, list of valid {passenger: pairs} solutions),
+        in _object_graph_clusters' cluster order
+    """
+    type_atoms, base_relational, clusters, local_matchings, cluster_edges = _object_graph_clusters(graph)
+    cluster_solutions = [
+        (cluster, _cluster_solutions(cluster, local_matchings, cluster_edges[idx]))
+        for idx, cluster in enumerate(clusters)
+    ]
+    return type_atoms, base_relational, cluster_solutions
+
+
+class _ArrayGraph(object):
+    """Bare .x/.edge_index/.edge_attr holder, so the decoder can run on the plain numpy
+    arrays facts_to_object_graph returns, with no torch_geometric Data involved."""
+
+    def __init__(self, x, edge_index, edge_attr):
+        self.x = x
+        self.edge_index = edge_index
+        self.edge_attr = edge_attr
+
+
+def object_hypothesis_count(node_feats, edge_index, edge_attr, pid):
+    """
+    Number of valid object-encoding hypotheses for the cluster containing passenger
+    `pid` -- more than one means the object encoding cannot tell which of the cluster's
+    request pairings is real. The env-side ambiguous-delivery diagnostic calls this on
+    the TRUE state's object encoding; the planner's decode_object uses the same
+    _object_cluster_solutions underneath, so the two can never disagree.
+
+    :param node_feats: object node features [n_obj, 3] (numpy or tensor, any device)
+    :param edge_index: [2, E]
+    :param edge_attr: [E, 10] (OBJECT_EDGE_LABELS)
+    :param pid: a passenger's object id
+    :return: int >= 1
+    :raises ValueError: if pid is not a passenger in this graph, or the graph is
+        malformed (see _object_graph_clusters)
+    """
+    _type_atoms, _base, cluster_solutions = _object_cluster_solutions(_ArrayGraph(node_feats, edge_index, edge_attr))
+    for cluster, solutions in cluster_solutions:
+        if pid in cluster:
+            return len(solutions)
+    raise ValueError(f"object_hypothesis_count: {pid} is not a passenger in this object graph")
+
+
 def enumerate_object_hypotheses(graph):
     """
     Every FULL request-fact hypothesis consistent with the object graph -- decision
@@ -383,19 +435,15 @@ def enumerate_object_hypotheses(graph):
         product exceeds MAX_CLUSTER_COMBINATIONS (distinct from, and in addition to,
         _object_graph_clusters' own per-cluster guard)
     """
-    type_atoms, base_relational, clusters, local_matchings, cluster_edges = _object_graph_clusters(graph)
-
-    per_cluster_solutions = [
-        _cluster_solutions(cluster, local_matchings, cluster_edges[idx])
-        for idx, cluster in enumerate(clusters)
-    ]
+    type_atoms, base_relational, cluster_solutions = _object_cluster_solutions(graph)
+    per_cluster_solutions = [solutions for _cluster, solutions in cluster_solutions]
 
     total = 1
     for solutions in per_cluster_solutions:
         total *= len(solutions)
     if total > MAX_CLUSTER_COMBINATIONS:
         raise ValueError(
-            f"enumerate_object_hypotheses: {len(clusters)} independent ambiguous clusters "
+            f"enumerate_object_hypotheses: {len(cluster_solutions)} independent ambiguous clusters "
             f"combine to {total} total hypotheses, exceeding the {MAX_CLUSTER_COMBINATIONS} "
             f"limit -- use decode_object instead, which resolves each cluster independently "
             f"and never materialises this cross-product"
@@ -425,13 +473,14 @@ def decode_object(graph):
     clusters in the SAME observation get independently-resolved (but each
     individually still deterministic and reproducible) choices, rather than all
     ambiguous clusters happening to move together. This is the ONLY convention whose
-    decode is not exact -- see this module's own docstring.
+    decode is not exact -- see this module's own docstring. Per-cluster hypotheses come
+    from _object_cluster_solutions, the same source object_hypothesis_count (and so the
+    env-side ambiguous-delivery diagnostic) uses.
     """
-    type_atoms, base_relational, clusters, local_matchings, cluster_edges = _object_graph_clusters(graph)
+    type_atoms, base_relational, cluster_solutions = _object_cluster_solutions(graph)
 
     request_facts = []
-    for idx, cluster in enumerate(clusters):
-        solutions = _cluster_solutions(cluster, local_matchings, cluster_edges[idx])
+    for cluster, solutions in cluster_solutions:
         if len(solutions) == 1:
             chosen = solutions[0]
         else:

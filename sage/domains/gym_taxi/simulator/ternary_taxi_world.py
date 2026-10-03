@@ -32,11 +32,29 @@ import networkx as nx
 
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from sage.domains.gym_taxi.simulator.ternary_planner import object_hypothesis_count
 from sage.domains.gym_taxi.utils.config import MAX_EPISODE_LENGTH
+from sage.domains.gym_taxi.utils.ternary_representations import facts_to_object_graph
 from sage.domains.gym_taxi.utils.utils import generate_city_maze
 
 
 DEFAULT_REWARDS = {"base": 0, "failed-action": 0, "drop-off": 1}
+
+# Ambiguous-delivery diagnostic: per-episode counters, returned in act()'s info dict on
+# every call (so Monitor's info_keywords pick up the totals on whichever step ends the
+# episode). A dropoff with nobody aboard counts ONLY towards dropoff_empty; every other
+# counter refers to dropoffs attempted while carrying a passenger. "ambiguous" means the
+# OBJECT encoding of the true state has more than one valid hypothesis for the carried
+# passenger's cluster (ternary_planner.object_hypothesis_count > 1) -- computed whatever
+# graph convention the env actually uses, so it measures exposure to the ambiguity.
+DROPOFF_DIAGNOSTIC_KEYS = (
+    "dropoff_attempts",
+    "dropoff_attempts_ambiguous",
+    "dropoff_failures",
+    "dropoff_failures_ambiguous",
+    "dropoff_failures_own_other_dest",
+    "dropoff_empty",
+)
 
 # facts() emits type atoms (one per object) first, in ascending object-id order --
 # taxi (0), then locations (1..size*size), then passengers -- so that a future
@@ -68,6 +86,18 @@ class TernaryPassenger(NamedTuple):
     # The buddy's passenger id, or None if this passenger was never paired or their
     # buddy has already been delivered.
     buddy: Optional[int]
+
+
+class DropoffRecord(NamedTuple):
+    """One dropoff attempted while carrying a passenger (see DROPOFF_DIAGNOSTIC_KEYS)."""
+    pid: int
+    location: int
+    success: bool
+    object_ambiguous: bool
+    # Only ever True on a failure: the taxi stood on one of pid's OWN request
+    # destinations, just not the one its picked_up_at selects -- the signature of a
+    # wrong guess between pid's own pairings.
+    own_other_dest: bool
 
 
 class TernaryTaxiWorldSimulator(object):
@@ -137,6 +167,10 @@ class TernaryTaxiWorldSimulator(object):
         self.done = False
         self.planning = planning
         self.observation_fn = observation_fn
+        # A fresh simulator per episode (BaseTaxiEnv.reset rebuilds it), so these are
+        # per-episode by construction.
+        self.dropoff_counts = {key: 0 for key in DROPOFF_DIAGNOSTIC_KEYS}
+        self.dropoff_records: List[DropoffRecord] = []
 
         # RNG call order matters: generate_road_network then add_taxi, in that order
         # and with no RNG draws in between, exactly mirrors TaxiWorldSimulator's own
@@ -279,7 +313,8 @@ class TernaryTaxiWorldSimulator(object):
 
         :param action: a node id -- self.taxi.node (0) to attempt a dropoff, a live
             passenger id to attempt a pickup, or a location id to attempt a move.
-        :returns: (observation_fn(self), reward, done, {})
+        :returns: (observation_fn(self), reward, done, info) -- info is a copy of the
+            episode's running dropoff_counts (DROPOFF_DIAGNOSTIC_KEYS)
         :raises KeyError: if action is a location id with no road from the taxi's
             current location (the same condition under which TaxiWorldSimulator's
             attempt_move raises KeyError), or an id that is none of the above.
@@ -300,7 +335,7 @@ class TernaryTaxiWorldSimulator(object):
                 "only builds the simulator and its facts(); the env-wiring commit "
                 "supplies observation_fn. Call facts() directly until then."
             )
-        return self.observation_fn(self), reward, self.done, {}
+        return self.observation_fn(self), reward, self.done, dict(self.dropoff_counts)
 
     def _apply(self, action):
         """The dynamics for a single action, split out from act() so a caller that
@@ -342,6 +377,7 @@ class TernaryTaxiWorldSimulator(object):
         """
         pid = self.taxi.passenger
         if pid is None:
+            self.dropoff_counts["dropoff_empty"] += 1
             return self.rewards["failed-action"]
         passenger = self.passengers[pid]
         matching_destinations = [
@@ -352,6 +388,7 @@ class TernaryTaxiWorldSimulator(object):
             f"picked_up_at ({passenger.picked_up_at}), found {matching_destinations}"
         )
         destination = matching_destinations[0]
+        self._record_dropoff_attempt(pid, passenger, destination)
         if self.taxi.location != destination:
             return self.rewards["failed-action"]
 
@@ -363,6 +400,35 @@ class TernaryTaxiWorldSimulator(object):
         self.delivery_limit -= 1
         self._renumber_passengers()
         return self.rewards["drop-off"]
+
+    def _object_ambiguous(self, pid):
+        """Whether the OBJECT encoding of the current (true) state admits more than one
+        hypothesis for pid's cluster -- the planner's own decoder logic, via
+        object_hypothesis_count, never a reimplementation. Diagnostic only: it reads
+        facts() and changes no state."""
+        meta = {"time": self.time, "timeout": self.timeout, "planning": True}
+        node_feats, edge_feats, edge_index, _mask, _global = facts_to_object_graph(self.facts(), meta)
+        return object_hypothesis_count(node_feats, edge_index, edge_feats, pid) > 1
+
+    def _record_dropoff_attempt(self, pid, passenger, destination):
+        """Updates the ambiguous-delivery diagnostic for a dropoff attempted while
+        carrying pid, BEFORE the dropoff changes any state (a success deletes pid)."""
+        success = self.taxi.location == destination
+        object_ambiguous = self._object_ambiguous(pid)
+        own_other_dest = (not success) and self.taxi.location in {d for _o, d in passenger.requests}
+        self.dropoff_records.append(
+            DropoffRecord(int(pid), int(self.taxi.location), success, object_ambiguous, own_other_dest)
+        )
+        counts = self.dropoff_counts
+        counts["dropoff_attempts"] += 1
+        if object_ambiguous:
+            counts["dropoff_attempts_ambiguous"] += 1
+        if not success:
+            counts["dropoff_failures"] += 1
+            if object_ambiguous:
+                counts["dropoff_failures_ambiguous"] += 1
+            if own_other_dest:
+                counts["dropoff_failures_own_other_dest"] += 1
 
     def _attempt_move(self, action):
         start = self.taxi.location
