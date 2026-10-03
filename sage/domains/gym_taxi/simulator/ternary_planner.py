@@ -37,6 +37,7 @@ import torch as th
 from torch_geometric.data import Data
 
 from sage.domains.gym_taxi.simulator.planner import increment_timer
+from sage.domains.gym_taxi.utils.compat import data_keys
 from sage.domains.gym_taxi.utils.ternary_representations import (
     ATOM_MAX_ARITY,
     ATOM_PREDICATES_TERNARY,
@@ -47,6 +48,7 @@ from sage.domains.gym_taxi.utils.ternary_representations import (
     facts_to_atom_graph,
     facts_to_object_graph,
     facts_to_vilg_graph,
+    oracle_facts_to_facts,
     _validate_facts,
 )
 
@@ -727,22 +729,46 @@ def _reencode(facts, encode_fn, reference_graph):
     return projection
 
 
-def plan_ternary(graph, goal, graph_convention):
+def decode_oracle_facts(graph):
+    """Oracle-decoder condition: the TRUE facts, read from graph.oracle_facts (attached
+    by json_to_ternary_graph_object_oracle) instead of decoded from the object graph.
+    Exact by construction; any device."""
+    return oracle_facts_to_facts(graph.oracle_facts)
+
+
+def plan_ternary(graph, goal, graph_convention, oracle=False):
     """
     Planner.plan's ternary-domain implementation, for all three conventions -- decode
-    -> plan_on_facts -> re-encode -> increment_timer. Never reads anything on `graph`
-    beyond x/edge_index/edge_attr/global_features (decision 5); never mutates `graph`
-    (every decoder/transform below is pure; the projection is always freshly built).
+    -> plan_on_facts -> re-encode -> increment_timer. Without `oracle`, never reads
+    anything on `graph` beyond x/edge_index/edge_attr/global_features (decision 5).
+    With `oracle` (the oracle-decoder condition, oracle_sage only) the facts come from
+    graph.oracle_facts instead of the object hypothesis decoder; planning and
+    re-encoding are unchanged. Never mutates `graph` (every decoder/transform below is
+    pure; the projection is always freshly built, with the usual five attributes).
 
     :param graph: a ternary Data (any device) for `graph_convention`
     :param goal: node id the policy selected
     :param graph_convention: "oracle_sage" | "vilg" | "atom"
+    :param oracle: Planner.oracle -- an explicit flag, never inferred from the Data
     :return: (projection, actions) -- same shape as the old Planner.plan/plan_atom
+    :raises ValueError: if oracle is True and graph has no oracle_facts, or oracle is
+        False and graph has oracle_facts (a mis-wired env/planner pair either way), or
+        oracle is True for a convention other than oracle_sage
     """
     decode = _DECODERS.get(graph_convention)
     if decode is None:
         raise ValueError(f"plan_ternary: unrecognised graph_convention {graph_convention!r}")
     encode = _ENCODERS[graph_convention]
+
+    has_oracle_facts = "oracle_facts" in data_keys(graph)
+    if oracle and not has_oracle_facts:
+        raise ValueError("plan_ternary: oracle=True but the observation has no oracle_facts attribute")
+    if not oracle and has_oracle_facts:
+        raise ValueError("plan_ternary: oracle=False but the observation carries oracle_facts")
+    if oracle:
+        if graph_convention != "oracle_sage":
+            raise ValueError(f"plan_ternary: oracle=True requires graph_convention='oracle_sage', got {graph_convention!r}")
+        decode = decode_oracle_facts
 
     facts = decode(graph)
     actions, projected_facts = plan_on_facts(facts, goal)
