@@ -174,6 +174,26 @@ class TestOracleDeliveries(unittest.TestCase):
 # ==========================================================================================
 
 class TestGnnUnaffected(unittest.TestCase):
+    """
+    On CPU the GNN outputs must be bitwise identical with and without oracle_facts.
+
+    On CUDA they are compared with th.allclose(rtol=1e-5, atol=1e-6) instead: the GNN's
+    message aggregation and global pooling are scatter-adds, which on the GPU use atomic
+    float additions whose order varies from run to run, and float addition is not
+    associative -- so two forwards of the SAME input can differ in the last bits.
+    analysis/oracle_cuda_determinism.py checks that the with/without-oracle_facts
+    difference is no larger than this run-to-run noise. The symbolic inputs involve no
+    arithmetic and stay exact on both devices.
+    """
+
+    def _assert_close_or_equal(self, a, b, label, exact):
+        max_abs = (a - b).abs().max().item() if a.numel() else 0.0
+        print(f"\n[{label}] max abs diff with vs without oracle_facts: {max_abs:.3e}")
+        if exact:
+            self.assertTrue(th.equal(a, b), f"{label} differ (max abs diff {max_abs:.3e})")
+        else:
+            self.assertTrue(th.allclose(a, b, rtol=1e-5, atol=1e-6), f"{label} differ (max abs diff {max_abs:.3e})")
+
     def _assert_latents_equal(self, device):
         env, model = build_model(oracle_decoder=True, device=device)
         policy = model.policy
@@ -192,9 +212,11 @@ class TestGnnUnaffected(unittest.TestCase):
         self.assertEqual(set(data_keys(sym_with)) - set(data_keys(sym_without)), {"oracle_facts"})
         for name in ("x", "edge_index", "edge_attr", "global_features"):
             self.assertTrue(th.equal(getattr(sym_with, name), getattr(sym_without, name)), f"symbolic {name}")
-        self.assertTrue(th.equal(with_oracle.x, without_oracle.x), "latent node embeddings differ")
-        self.assertTrue(th.equal(with_oracle.global_features, without_oracle.global_features), "latent globals differ")
-        self.assertTrue(th.equal(values_with, values_without), "values differ")
+        exact = th.device(device).type == "cpu"
+        self._assert_close_or_equal(with_oracle.x, without_oracle.x, f"{device} latent node embeddings", exact)
+        self._assert_close_or_equal(with_oracle.global_features, without_oracle.global_features,
+                                    f"{device} latent globals", exact)
+        self._assert_close_or_equal(values_with, values_without, f"{device} values", exact)
 
     def test_get_latent_identical_cpu(self):
         self._assert_latents_equal("cpu")
