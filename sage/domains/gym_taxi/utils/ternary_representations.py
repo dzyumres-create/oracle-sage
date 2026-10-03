@@ -552,7 +552,50 @@ def _ternary_observation_fn(sim):
     return facts_to_json(sim.facts(), meta)
 
 
-def _ternary_json_to_data(js, facts_to_graph_fn):
+# ==========================================================================================
+# Oracle-decoder condition: the true facts as one fixed-width int64 tensor per graph
+# ==========================================================================================
+
+# Column 0 is the predicate's index into TERNARY_PREDICATES; columns 1.. hold its
+# arguments, padded with -1 up to the largest arity (request's 3).
+ORACLE_FACTS_WIDTH = 1 + max(PREDICATE_ARITY.values())
+ORACLE_FACTS_PAD = -1
+
+
+def facts_to_oracle_facts(facts):
+    """
+    Encodes a facts list as an int64 array [n_facts, ORACLE_FACTS_WIDTH] -- rectangular,
+    so it can ride on a torch_geometric Data as a plain tensor attribute and survive
+    Batch.from_data_list / .to(device) / to_data_list (PyG concatenates it along dim 0
+    and splits it back per graph; its name contains neither "index" nor "face", so PyG
+    never offsets its values).
+
+    :param facts: list of (predicate, args_tuple)
+    :return: np.int64 array
+    """
+    out = np.full((len(facts), ORACLE_FACTS_WIDTH), ORACLE_FACTS_PAD, dtype=np.int64)
+    for row, (predicate, args) in enumerate(facts):
+        out[row, 0] = TERNARY_PREDICATES.index(predicate)
+        out[row, 1:1 + len(args)] = args
+    return out
+
+
+def oracle_facts_to_facts(oracle_facts):
+    """
+    Inverse of facts_to_oracle_facts. Accepts a numpy array or a tensor on any device.
+
+    :return: list of (predicate, args_tuple) with plain-int args
+    """
+    if isinstance(oracle_facts, th.Tensor):
+        oracle_facts = oracle_facts.detach().cpu().numpy()
+    facts = []
+    for row in np.asarray(oracle_facts).tolist():
+        args = tuple(int(a) for a in row[1:] if a != ORACLE_FACTS_PAD)
+        facts.append((TERNARY_PREDICATES[int(row[0])], args))
+    return facts
+
+
+def _ternary_json_to_data(js, facts_to_graph_fn, attach_oracle_facts=False):
     """
     Shared body for json_to_ternary_graph_object/_vilg/_atom: decodes one convention's
     worth of compact-facts JSON into a torch_geometric Batch, following
@@ -566,6 +609,9 @@ def _ternary_json_to_data(js, facts_to_graph_fn):
         calling convention as json_to_graph/json_to_atom_graph: each element indexable
         as `j[0]`)
     :param facts_to_graph_fn: facts_to_object_graph / facts_to_vilg_graph / facts_to_atom_graph
+    :param attach_oracle_facts: also attach the TRUE facts as oracle_facts (int64
+        [n_facts, ORACLE_FACTS_WIDTH]) -- the oracle-decoder condition only. Read by
+        the planner alone; no feature extractor, GNN or head reads it.
     :return: Batch
     """
     data = []
@@ -579,6 +625,8 @@ def _ternary_json_to_data(js, facts_to_graph_fn):
         )
         d.mask = th.as_tensor(mask, dtype=th.bool)
         d.global_features = th.as_tensor(global_feats, dtype=th.float32).unsqueeze(0)
+        if attach_oracle_facts:
+            d.oracle_facts = th.as_tensor(facts_to_oracle_facts(facts), dtype=th.long)
         data.append(d)
     return Batch.from_data_list(data)
 
@@ -587,6 +635,13 @@ def json_to_ternary_graph_object(js):
     """Policy-side decoder for graph_convention="oracle_sage" on the ternary domain --
     see _ternary_json_to_data."""
     return _ternary_json_to_data(js, facts_to_object_graph)
+
+
+def json_to_ternary_graph_object_oracle(js):
+    """Policy-side decoder for the oracle-decoder condition: exactly
+    json_to_ternary_graph_object's Data (the GNN sees the object encoding as in Cell 1),
+    plus the true facts as oracle_facts for the planner."""
+    return _ternary_json_to_data(js, facts_to_object_graph, attach_oracle_facts=True)
 
 
 def json_to_ternary_graph_vilg(js):

@@ -27,16 +27,39 @@ from sage.agent.async_vec_env import AsyncVecEnv
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_DIAGNOSTIC_KEYS
 from sage.domains.gym_taxi.utils.compat import spec_kwargs
 
+ORACLE_DECODER_SUFFIX = "_oracle_decoder"
+
+def is_ternary_env(env_name):
+    """Ternary-ness comes from the registered spec's own kwargs, read through
+    compat.spec_kwargs (gym 0.18 has no spec.kwargs)."""
+    return bool(spec_kwargs(gym.spec(env_name)).get("ternary", False))
+
 def info_keywords_for(env_name):
     """Monitor info_keywords for env_name: ("len100","len200") for every env, plus the
     ambiguous-delivery diagnostic's per-episode dropoff counters for ternary-domain envs
     only, so every other env's Monitor fields (and its logged progress/* keys) stay
-    exactly as before. Ternary-ness comes from the registered spec's own kwargs, read
-    through compat.spec_kwargs (gym 0.18 has no spec.kwargs)."""
+    exactly as before."""
     info_keywords = ("len100","len200")
-    if spec_kwargs(gym.spec(env_name)).get("ternary", False):
+    if is_ternary_env(env_name):
         info_keywords = info_keywords + DROPOFF_DIAGNOSTIC_KEYS
     return info_keywords
+
+def validate_oracle_decoder(env_name, graph_convention):
+    """--oracle-decoder is only meaningful for the ternary env's object encoding
+    (oracle_sage): the condition separates "the GNN can't see the destination" from
+    "the planner routes to the wrong place", and only there does the object encoding
+    hide the destination."""
+    if not is_ternary_env(env_name) or graph_convention != "oracle_sage":
+        raise ValueError(
+            f"--oracle-decoder requires a ternary env and --graph-convention oracle_sage; "
+            f"got --env-name {env_name!r}, --graph-convention {graph_convention!r}"
+        )
+
+def oracle_decoder_dir(path):
+    """save_dir/log_dir for an --oracle-decoder run: the given path with a fixed suffix,
+    so it can never overwrite or mix with a Cell 1 run given the same flags
+    (e.g. ./logs/cell1_seed0 -> ./logs/cell1_seed0_oracle_decoder, ./logs/ -> ./logs_oracle_decoder)."""
+    return path.rstrip("/\\") + ORACLE_DECODER_SUFFIX
 
 def run(variant):
 
@@ -49,6 +72,8 @@ def run(variant):
     env_kwargs = {}
     if variant["graph_convention"] != "oracle_sage":
         env_kwargs["graph_convention"] = variant["graph_convention"]
+    if variant.get("oracle_decoder", False):
+        env_kwargs["oracle_decoder"] = True
 
     if variant["planner"]:
         env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv,env_kwargs=env_kwargs)
@@ -85,6 +110,14 @@ def main(arglist):
         default="oracle_sage",
         choices=["oracle_sage", "vilg", "atom"],
         help="graph construction convention for Taxi's graph observations (default: oracle_sage)",
+    )
+    parser.add_argument(
+        "--oracle-decoder",
+        action="store_true",
+        default=False,
+        help="Cell 1 oracle-decoder condition: the GNN sees the object encoding as in Cell 1, "
+             "the planner receives the true facts. Ternary env with --graph-convention oracle_sage "
+             "only; appends '" + ORACLE_DECODER_SUFFIX + "' to --save-dir and --log-dir.",
     )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
@@ -255,6 +288,10 @@ def main(arglist):
     )
 
     args = parser.parse_args(arglist)
+    if args.oracle_decoder:
+        validate_oracle_decoder(args.env_name, args.graph_convention)
+        args.save_dir = oracle_decoder_dir(args.save_dir)
+        args.log_dir = oracle_decoder_dir(args.log_dir)
     if args.lr_decay:
         learning_rate = get_linear_fn(
             args.learning_rate, args.learning_rate/10, 0.5
@@ -267,6 +304,7 @@ def main(arglist):
         version="normal",
         env_name=args.env_name,
         graph_convention=args.graph_convention,
+        oracle_decoder=args.oracle_decoder,
         seed=args.seed,
         num_env_steps=args.num_env_steps,
         num_processes=args.num_processes,

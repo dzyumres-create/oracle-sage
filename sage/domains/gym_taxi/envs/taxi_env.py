@@ -30,6 +30,7 @@ from sage.domains.gym_taxi.utils.ternary_representations import (
     TERNARY_GRAPH_CONVENTION_CONVERTERS,
     TERNARY_JSON_WIDTH,
     _ternary_observation_fn,
+    json_to_ternary_graph_object_oracle,
 )
 from sage.domains.gym_taxi.utils.config import (
     MAP,
@@ -580,7 +581,8 @@ class JsonTaxiEnv(BaseTaxiEnv):
 
 
 class GraphTaxiEnv(BaseTaxiEnv):
-    def __init__(self, representation, scenario, mask=False, rewards=None, graph_convention="oracle_sage", ternary=False):
+    def __init__(self, representation, scenario, mask=False, rewards=None, graph_convention="oracle_sage", ternary=False,
+                 oracle_decoder=False):
         # `ternary` selects the ternary-predicate domain (TernaryTaxiWorldSimulator,
         # TERNARY_GRAPH_CONVENTIONS/TERNARY_GRAPH_CONVENTION_CONVERTERS/TERNARY_JSON_WIDTH)
         # instead of the old domain's own dicts, which are never re-keyed or edited --
@@ -593,6 +595,15 @@ class GraphTaxiEnv(BaseTaxiEnv):
             raise ValueError(
                 f"invalid graph_convention {graph_convention!r}; expected one of {sorted(conventions)}"
             )
+        # Oracle-decoder condition: the GNN sees the object encoding exactly as in Cell 1,
+        # while the planner receives the true facts (oracle_facts on each Data). Only
+        # meaningful where the object encoding hides something -- the ternary domain.
+        if oracle_decoder and not (ternary and graph_convention == "oracle_sage"):
+            raise ValueError(
+                f"oracle_decoder=True requires ternary=True and graph_convention='oracle_sage'; "
+                f"got ternary={ternary!r}, graph_convention={graph_convention!r}"
+            )
+        self.oracle_decoder = oracle_decoder
         self.rewards = rewards
         self.scenario = SCENARIOS[scenario]
         self.mask=mask
@@ -601,14 +612,17 @@ class GraphTaxiEnv(BaseTaxiEnv):
         #image = _construct_image(representation, scenario)
         node_dimension, edge_dimension = conventions[graph_convention]
         if ternary:
-            converter = TERNARY_GRAPH_CONVENTION_CONVERTERS[graph_convention]
+            if oracle_decoder:
+                converter = json_to_ternary_graph_object_oracle
+            else:
+                converter = TERNARY_GRAPH_CONVENTION_CONVERTERS[graph_convention]
             width = TERNARY_JSON_WIDTH
         else:
             converter = GRAPH_CONVENTION_CONVERTERS[graph_convention]
             width = GRAPH_CONVENTION_JSON_WIDTH[graph_convention]
         self.observation_space = JsonGraph(
             converter=converter,node_dimension=node_dimension,edge_dimension=edge_dimension,
-            planner=Planner(graph_convention=self.graph_convention, ternary=ternary),
+            planner=Planner(graph_convention=self.graph_convention, ternary=ternary, oracle=oracle_decoder),
             width=width,
         )
         self.first = True

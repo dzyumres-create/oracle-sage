@@ -27,12 +27,21 @@ class State(NamedTuple):
 
 class Planner:
 
-    def __init__(self, graph_convention="oracle_sage", ternary=False):
+    def __init__(self, graph_convention="oracle_sage", ternary=False, oracle=False):
         self.graph_convention = graph_convention
         # Set only by GraphTaxiEnv for a ternary-domain observation space -- the
         # ternary planner does not exist yet (decision 5). Default False preserves
         # every existing call site (old-domain envs never pass this) byte-for-byte.
         self.ternary = ternary
+        # Oracle-decoder condition (Cell 1 with the true facts): set only by
+        # GraphTaxiEnv(oracle_decoder=True), valid only for the ternary domain's
+        # oracle_sage convention. Default False leaves every existing call site as is.
+        if oracle and not (ternary and graph_convention == "oracle_sage"):
+            raise ValueError(
+                f"Planner(oracle=True) requires ternary=True and graph_convention='oracle_sage'; "
+                f"got ternary={ternary!r}, graph_convention={graph_convention!r}"
+            )
+        self.oracle = oracle
 
     def plan(self,graph,goal):
         if self.ternary:
@@ -42,7 +51,7 @@ class Planner:
             # CALLED, this module has already finished loading, so this import always
             # succeeds immediately.
             from sage.domains.gym_taxi.simulator.ternary_planner import plan_ternary
-            return plan_ternary(graph, goal, self.graph_convention)
+            return plan_ternary(graph, goal, self.graph_convention, oracle=self.oracle)
         if self.graph_convention == "atom":
             return plan_atom(graph, goal)
         if self.graph_convention == "vilg":
