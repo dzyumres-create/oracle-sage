@@ -57,6 +57,7 @@ from sage.domains.gym_taxi.simulator.ternary_planner import (
     plan_ternary,
 )
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import TernaryTaxiWorldSimulator
+from sage.domains.gym_taxi.utils.compat import data_keys
 from sage.domains.gym_taxi.utils.config import CITY_TERNARY
 from sage.domains.gym_taxi.utils.ternary_representations import (
     facts_to_atom_graph,
@@ -526,7 +527,7 @@ class TestNoAttributeLeak(unittest.TestCase):
             planner = Planner(graph_convention=convention, ternary=True)
             target = next(iter(sim.roads.successors(sim.taxi.location)))
             projection, _actions = planner.plan(graph, target)
-            self.assertEqual(set(projection.keys()), self.EXPECTED_KEYS, f"{convention}: projection has unexpected keys")
+            self.assertEqual(set(data_keys(projection)), self.EXPECTED_KEYS, f"{convention}: projection has unexpected keys")
 
     def test_input_graph_from_real_env_has_no_extra_attributes(self):
         """What planner.plan() actually receives (post Batch.to_data_list()) -- see
@@ -535,7 +536,7 @@ class TestNoAttributeLeak(unittest.TestCase):
         for convention in CONVENTIONS:
             sim = make_ternary_sim(0)
             graph = make_graph(sim, convention)
-            self.assertEqual(set(graph.keys()), self.EXPECTED_KEYS)
+            self.assertEqual(set(data_keys(graph)), self.EXPECTED_KEYS)
 
 
 # ==========================================================================================

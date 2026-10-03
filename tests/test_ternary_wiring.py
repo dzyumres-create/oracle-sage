@@ -44,6 +44,7 @@ from torch_geometric.data import Batch
 from sage.domains.gym_taxi import REWARDS
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import TernaryTaxiWorldSimulator
+from sage.domains.gym_taxi.utils.compat import spec_kwargs
 from sage.domains.gym_taxi.utils.ternary_representations import (
     TERNARY_GRAPH_CONVENTIONS,
     TERNARY_GRAPH_CONVENTION_CONVERTERS,
@@ -119,16 +120,17 @@ def _step_mask(n_envs):
 class TestRegistration(unittest.TestCase):
     def test_registered_spec_kwargs(self):
         spec = gym_module.spec("city-taxi-ternary-unmasked-v1")
+        kwargs = spec_kwargs(spec)
         self.assertEqual(spec.entry_point, "sage.domains.gym_taxi.envs:GraphTaxiEnv")
-        self.assertEqual(spec.kwargs["scenario"], "city_ternary")
-        self.assertEqual(spec.kwargs["mask"], False)
-        self.assertEqual(spec.kwargs["ternary"], True)
-        self.assertEqual(spec.kwargs["rewards"], REWARDS["v1"])
+        self.assertEqual(kwargs["scenario"], "city_ternary")
+        self.assertEqual(kwargs["mask"], False)
+        self.assertEqual(kwargs["ternary"], True)
+        self.assertEqual(kwargs["rewards"], REWARDS["v1"])
 
     def test_constructed_from_spec_kwargs_per_convention(self):
         spec = gym_module.spec("city-taxi-ternary-unmasked-v1")
         for convention in CONVENTIONS:
-            env = GraphTaxiEnv(**spec.kwargs, graph_convention=convention)
+            env = GraphTaxiEnv(**spec_kwargs(spec), graph_convention=convention)
             self.assertIsInstance(env.sim, TernaryTaxiWorldSimulator)
             node_dim, edge_dim = TERNARY_GRAPH_CONVENTIONS[convention]
             self.assertEqual(env.observation_space.node_dimension, node_dim)
@@ -440,16 +442,33 @@ class TestPlannerNowWired(unittest.TestCase):
 
 # ==========================================================================================
 # (g) Old domain unchanged -- fixed seed + action sequence, observations identical
-#     before/after this commit. Hashes recorded from HEAD (a628f16) via `git stash` /
-#     `git stash pop` around a standalone capture script, before writing any of this
-#     commit's edits; see the conversation record for the exact script.
+#     before/after this commit.
+#
+#     References are keyed by library stack, because the hash is only meaningful within
+#     one: env.seed() gives a numpy Generator under gym 0.26 but a RandomState under
+#     gym 0.18, so the same seed yields different mazes and passengers. Compute an entry
+#     with analysis/old_domain_obs_hash.py (same seed, actions and hashing as this test),
+#     run against the pre-ternary commit a628f16 on the stack in question.
+#
+#     gym0.26: recorded on the Mac from a628f16 via `git stash` / `git stash pop` around a
+#              standalone capture script, before the wiring commit's edits.
+#     gym0.18: RCP; not yet recorded.
 # ==========================================================================================
 
 OLD_DOMAIN_REFERENCE_SHA256 = {
-    "oracle_sage": "984aee8dc43d9e24c03a0f2a6d044ed407aa1968b0068b4a15ea269e53d20113",
-    "vilg": "90617bddec63dfb707212be3d428281c21f8db55b81914d4dc62cf167f8b0d9e",
-    "atom": "443aba261710f3dc090cd55617c1f0f019a4ec4a3ce3d04dc3cf5f358e346ecc",
+    "gym0.26": {
+        "oracle_sage": "984aee8dc43d9e24c03a0f2a6d044ed407aa1968b0068b4a15ea269e53d20113",
+        "vilg": "90617bddec63dfb707212be3d428281c21f8db55b81914d4dc62cf167f8b0d9e",
+        "atom": "443aba261710f3dc090cd55617c1f0f019a4ec4a3ce3d04dc3cf5f358e346ecc",
+    },
+    "gym0.18": {},
 }
+
+
+def _stack_key():
+    """e.g. "gym0.26" -- the gym version decides what env.seed() returns, which is the
+    part of the stack the old-domain observation stream depends on."""
+    return "gym" + ".".join(gym_module.__version__.split(".")[:2])
 
 
 def _old_domain_sample_action(sim):
@@ -471,6 +490,17 @@ class TestOldDomainUnchanged(unittest.TestCase):
     def test_observations_match_pre_commit_reference_hash(self):
         from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv as OldGraphTaxiEnv
 
+        stack = _stack_key()
+        references = OLD_DOMAIN_REFERENCE_SHA256.get(stack, {})
+        missing = [c for c in CONVENTIONS if c not in references]
+        if missing:
+            self.skipTest(
+                f"no old-domain reference hash for stack {stack!r} (gym {gym_module.__version__}), "
+                f"conventions {missing}: compute them with "
+                f"`PYTHONPATH=. python analysis/old_domain_obs_hash.py <convention>` at commit a628f16 "
+                f"on this stack and add them to OLD_DOMAIN_REFERENCE_SHA256[{stack!r}]"
+            )
+
         for convention in CONVENTIONS:
             env = OldGraphTaxiEnv(representation="graph", scenario="city", mask=False, rewards=REWARDS["v1"], graph_convention=convention)
             env.seed(0)
@@ -485,8 +515,8 @@ class TestOldDomainUnchanged(unittest.TestCase):
             blob = "\x00".join(observations)
             actual_hash = hashlib.sha256(blob.encode()).hexdigest()
             self.assertEqual(
-                actual_hash, OLD_DOMAIN_REFERENCE_SHA256[convention],
-                f"{convention}: old-domain observations changed vs the pre-commit (HEAD a628f16) reference",
+                actual_hash, references[convention],
+                f"{convention}: old-domain observations changed vs the a628f16 reference for stack {stack!r}",
             )
             env.close()
 
