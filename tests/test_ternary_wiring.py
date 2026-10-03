@@ -452,7 +452,8 @@ class TestPlannerNowWired(unittest.TestCase):
 #
 #     gym0.26: recorded on the Mac from a628f16 via `git stash` / `git stash pop` around a
 #              standalone capture script, before the wiring commit's edits.
-#     gym0.18: RCP; not yet recorded.
+#     gym0.18: computed on RCP (gym 0.18.0) with analysis/old_domain_obs_hash.py;
+#              identical at a628f16 and 82c885f for every convention.
 # ==========================================================================================
 
 OLD_DOMAIN_REFERENCE_SHA256 = {
@@ -461,7 +462,11 @@ OLD_DOMAIN_REFERENCE_SHA256 = {
         "vilg": "90617bddec63dfb707212be3d428281c21f8db55b81914d4dc62cf167f8b0d9e",
         "atom": "443aba261710f3dc090cd55617c1f0f019a4ec4a3ce3d04dc3cf5f358e346ecc",
     },
-    "gym0.18": {},
+    "gym0.18": {
+        "oracle_sage": "0cf66d8854185d465e5da63eb16187cf77d61dcb749d5032ac67814c462c05b9",
+        "vilg": "327957eae8e6674af8b54e88933101a04035a95f189351c3697310de9d57a736",
+        "atom": "59ba07766f6bf0538f5952724e6d0ddcb5ed81849c9c8f95d4c900aad96be504",
+    },
 }
 
 
