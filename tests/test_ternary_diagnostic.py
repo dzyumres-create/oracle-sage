@@ -433,10 +433,12 @@ class TestRealPath(unittest.TestCase):
 # (e) Old domain: info dicts and Monitor CSV unchanged vs the pre-commit reference
 # ==========================================================================================
 
-# Computed with analysis/old_domain_info_hash.py at 82c885f (before Task A) and
-# identical in the working tree with Task A applied; keyed by stack like
+# Computed with analysis/old_domain_info_hash.py; keyed by stack like
 # test_ternary_wiring.OLD_DOMAIN_REFERENCE_SHA256 (env.seed differs by gym version).
-#   gym0.26: Mac (gym 0.26.2). gym0.18: RCP, not yet recorded.
+# Each entry is (monitor_sha256, info_sha256).
+#   gym0.26: Mac (gym 0.26.2); identical at 82c885f (before Task A) and with Task A applied.
+#   gym0.18: RCP (gym 0.18.0); identical at the pre-ternary commit a628f16 and with
+#            Task A applied, for every convention.
 OLD_DOMAIN_INFO_REFERENCE_SHA256 = {
     "gym0.26": {
         "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
@@ -446,7 +448,14 @@ OLD_DOMAIN_INFO_REFERENCE_SHA256 = {
         "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
                  "2b27206df4a5a0985c185fd82e709ccdd5e1f2cbf2592d093823329941d5c570"),
     },
-    "gym0.18": {},
+    "gym0.18": {
+        "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
+                        "56e7b5932943bd524ab83d39cfc9e498d2d19174b6b394c80183e07fa7c6f27a"),
+        "vilg": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
+                 "f1b23181a080adcad02c597291234b467fb3ac55b4f968757cc0749a125c5e6f"),
+        "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
+                 "121d53778c32495842f6dd3f198fc6615405e03486b429b6456649b849efae1c"),
+    },
 }
 
 
