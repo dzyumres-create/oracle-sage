@@ -24,10 +24,23 @@ from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.tb_logging import TensorboardCallback
 from sage.agent.checkpoint_callback import PeriodicCheckpointCallback
 from sage.agent.async_vec_env import AsyncVecEnv
+from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_DIAGNOSTIC_KEYS
+from sage.domains.gym_taxi.utils.compat import spec_kwargs
+
+def info_keywords_for(env_name):
+    """Monitor info_keywords for env_name: ("len100","len200") for every env, plus the
+    ambiguous-delivery diagnostic's per-episode dropoff counters for ternary-domain envs
+    only, so every other env's Monitor fields (and its logged progress/* keys) stay
+    exactly as before. Ternary-ness comes from the registered spec's own kwargs, read
+    through compat.spec_kwargs (gym 0.18 has no spec.kwargs)."""
+    info_keywords = ("len100","len200")
+    if spec_kwargs(gym.spec(env_name)).get("ternary", False):
+        info_keywords = info_keywords + DROPOFF_DIAGNOSTIC_KEYS
+    return info_keywords
 
 def run(variant):
 
-    info_keywords = ("len100","len200")
+    info_keywords = info_keywords_for(variant["env_name"])
 
     # gnn_global.py is a shared entrypoint (Taxi/Tradeoff/NLE); only Taxi's GraphTaxiEnv
     # accepts graph_convention, so only pass it through when it's been set away from the
