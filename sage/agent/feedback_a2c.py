@@ -92,6 +92,8 @@ class Feedback_A2C(A2C):
         _init_setup_model: bool = True,
         sample_entropy: bool = False,
         tis_heuristic: float = None,
+        update_chunks: int = 1,
+        log_grad_norms: bool = False,
         supported_action_spaces: Optional[Tuple[spaces.Space, ...]] = (
             spaces.Box,
             spaces.Discrete,
@@ -130,6 +132,13 @@ class Feedback_A2C(A2C):
         self.pvf_coef=pvf_coef
         self.tis_heuristic=tis_heuristic
         self.env_steps = 0
+        # Number of chunks the training update's forward/backward is split into (see
+        # _train_chunked). 1 keeps the original single-pass train() unchanged.
+        if not isinstance(update_chunks, int) or update_chunks < 1:
+            raise ValueError(f"update_chunks must be an int >= 1, got {update_chunks!r}")
+        self.update_chunks = update_chunks
+        # Logging only (see _log_grad_norms); never changes the update.
+        self.log_grad_norms = log_grad_norms
 
         if _init_setup_model: #overwrite base rollout buffer with explored version.
             self.rollout_buffer = EpsilonRolloutBuffer(
@@ -147,6 +156,8 @@ class Feedback_A2C(A2C):
         Update policy using the currently gathered
         rollout buffer (one gradient step over whole data).
         """
+        if self.update_chunks > 1:
+            return self._train_chunked()
         # Update optimizer learning rate
         self._update_learning_rate(self.policy.optimizer)
 
@@ -198,6 +209,8 @@ class Feedback_A2C(A2C):
             # Optimization step
             self.policy.optimizer.zero_grad()
             loss.backward()
+            if self.log_grad_norms:
+                self._log_grad_norms()
 
             # Clip grad norm
             th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
@@ -216,6 +229,143 @@ class Feedback_A2C(A2C):
             logger.record("train/path_value_loss", path_value_loss.item())
         if hasattr(self.policy, "log_std"):
             logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+
+    def _log_grad_norms(self) -> None:
+        """
+        Logging only (--log-grad-norms): the gradient norms going into this update's
+        clip_grad_norm_, read after backward and before clipping. Reads .grad, changes
+        nothing.
+
+        path_value_net is not in the optimizer (it is created after it), so
+        optimizer.zero_grad() never clears its .grad: it accumulates across updates, yet
+        clip_grad_norm_(self.policy.parameters(), ...) still counts it in the global norm.
+          train/grad_norm_head   norm of path_value_net's (accumulated) gradient
+          train/grad_norm_train  norm over the parameters the optimizer updates
+          train/grad_norm_total  the global norm clip_grad_norm_ computes
+          train/clip_coef        the factor it scales gradients by: min(1, max_norm / (total + 1e-6)),
+                                 torch's own formula
+        """
+        def norm(params):
+            norms = [p.grad.detach().norm(2) for p in params if p.grad is not None]
+            return th.norm(th.stack(norms), 2).item() if norms else 0.0
+
+        head = norm(self.policy.path_value_net.parameters()) if hasattr(self.policy, "path_value_net") else 0.0
+        trained = norm(p for group in self.policy.optimizer.param_groups for p in group["params"])
+        total = norm(self.policy.parameters())
+        logger.record("train/grad_norm_head", head)
+        logger.record("train/grad_norm_train", trained)
+        logger.record("train/grad_norm_total", total)
+        logger.record("train/clip_coef", min(1.0, self.max_grad_norm / (total + 1e-6)))
+
+    def _train_chunked(self) -> None:
+        """
+        train() with the forward/backward split into self.update_chunks chunks, to lower
+        the update's peak memory without changing the learning.
+
+        Same single batch (one rollout_buffer.get, so the same permutation draw), split
+        into contiguous slices of that order. Every loss term in train() is a mean over
+        the batch (policy, value and path-value losses over samples; the policy's entropy
+        over graphs), and nothing in the network couples graphs, so weighting chunk i's
+        loss by n_i / B makes the summed gradients equal train()'s gradient. Gradients
+        accumulate across chunks; clipping and the optimizer step happen once, on the
+        full gradient. Logged values are the same weighted sums, so they match train()'s.
+        Equal up to floating-point summation order, not bitwise.
+        """
+        use_cuda = self.device.type == "cuda"
+        if use_cuda:
+            th.cuda.reset_peak_memory_stats(self.device)
+
+        # Update optimizer learning rate
+        self._update_learning_rate(self.policy.optimizer)
+
+        # Same single full batch train() uses (consumed the same way)
+        for rollout_data in self.rollout_buffer.get(batch_size=None):
+            pass
+
+        actions = rollout_data.actions
+        if (isinstance(self.action_space, spaces.Discrete) or
+           isinstance(self.action_space, Autoregressive) ):
+            # Convert discrete action from float to long
+            actions = actions.long().flatten()
+
+        # Normalize advantage over the FULL batch, before chunking (not present in the original implementation)
+        advantages = rollout_data.advantages
+        if self.normalize_advantage:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        batch_size = actions.shape[0]
+        totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "entropy": 0.0, "path_value_loss": 0.0}
+
+        self.policy.optimizer.zero_grad()
+        for chunk in np.array_split(np.arange(batch_size), self.update_chunks):
+            if len(chunk) == 0:
+                continue
+            weight = len(chunk) / batch_size
+            index = th.as_tensor(chunk, dtype=th.long, device=actions.device)
+
+            values, log_prob, entropy, path_values = self.policy.evaluate_actions(
+                rollout_data.observations[chunk], actions[index]
+            )
+            values = values.flatten()
+            chunk_advantages = advantages[index]
+            returns = rollout_data.returns[index]
+            explored = rollout_data.explored[index]
+
+            # Policy gradient loss
+            policy_loss = -(chunk_advantages * log_prob)
+            if self.tis_heuristic is not None:
+                probs = th.exp(log_prob.detach())
+                policy_loss *= (probs*self.tis_heuristic).clamp(0,1) #clamp is the truncated in truncated importance sampling
+            policy_loss = policy_loss.mean()
+
+            # Value loss using the TD(gae_lambda) target
+            value_loss = F.mse_loss(returns*(1-explored), values*(1-explored))
+
+            # Entropy loss favor exploration
+            if entropy is None or self.sample_entropy:
+                # Approximate entropy when no analytical form
+                entropy_loss = -th.mean(-log_prob)
+            else:
+                entropy_loss = -th.mean(entropy)
+
+            if self.pvf_coef == 0:
+                loss = self.policy_coef*policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+            else:
+                path_values = path_values.flatten()
+                path_value_loss = F.mse_loss(returns, path_values)
+                loss = self.policy_coef*policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + self.pvf_coef * path_value_loss
+                totals["path_value_loss"] += weight * path_value_loss.item()
+
+            # Accumulate this chunk's share of the full-batch gradient
+            (weight * loss).backward()
+
+            totals["policy_loss"] += weight * policy_loss.item()
+            totals["value_loss"] += weight * value_loss.item()
+            totals["entropy_loss"] += weight * entropy_loss.item()
+            totals["entropy"] += weight * entropy.item()
+
+        if self.log_grad_norms:
+            self._log_grad_norms()
+
+        # Clip grad norm on the full accumulated gradient, then a single step
+        th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+        self.policy.optimizer.step()
+
+        explained_var = explained_variance(self.rollout_buffer.values.flatten(), self.rollout_buffer.returns.flatten())
+
+        self._n_updates += 1
+        logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        logger.record("train/explained_variance", explained_var)
+        logger.record("train/entropy_loss", totals["entropy_loss"])
+        logger.record("train/entropy", totals["entropy"])
+        logger.record("train/policy_loss", totals["policy_loss"])
+        logger.record("train/value_loss", totals["value_loss"])
+        if self.pvf_coef != 0:
+            logger.record("train/path_value_loss", totals["path_value_loss"])
+        if hasattr(self.policy, "log_std"):
+            logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+        if use_cuda:
+            logger.record("train/max_mem_gb", th.cuda.max_memory_allocated(self.device) / 2**30)
 
 
     def collect_rollouts(
