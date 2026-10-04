@@ -10,6 +10,7 @@ Run from the repo root with:
 Do not run while a training run is using the GPU.
 """
 import copy
+import io
 import math
 import random as pyrandom
 import unittest
@@ -17,6 +18,7 @@ from unittest import mock
 
 import gym as gym_module
 import numpy as np
+import torch as th
 
 # test_ternary_planner installs the gym-0.26 randint shim at import time (needed by
 # PlanFeedback_A2C/make_vec_env below); importing its helpers here keeps one shim.
@@ -31,7 +33,13 @@ from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.simulator.planner import Planner
 from sage.domains.gym_taxi.simulator.ternary_planner import _object_cluster_solutions, object_hypothesis_count
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import (
+    DROPOFF_ATTEMPTS,
+    DROPOFF_ATTEMPTS_AMBIGUOUS,
     DROPOFF_DIAGNOSTIC_KEYS,
+    DROPOFF_EMPTY,
+    DROPOFF_FAILURES,
+    DROPOFF_FAILURES_AMBIGUOUS,
+    DROPOFF_FAILURES_OWN_OTHER,
     DropoffRecord,
     TernaryTaxiWorldSimulator,
 )
@@ -41,6 +49,7 @@ from sage.domains.utils import spaces as sage_spaces
 from sage.experiments.gnn_global import info_keywords_for
 from sage.forks.stable_baselines3.stable_baselines3.common import logger as sb3_logger
 from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_vec_env
+from sage.forks.stable_baselines3.stable_baselines3.common.logger import HumanOutputFormat
 
 from analysis.old_domain_info_hash import old_domain_info_hashes
 
@@ -71,7 +80,7 @@ class TestHandChecked(unittest.TestCase):
     hypothesis -> not ambiguous.
 
     Script and expected records (written before running):
-      act(0)  nobody aboard                  -> dropoff_empty only, no record
+      act(0)  nobody aboard                  -> DROPOFF_EMPTY only, no record
       act(5)  pick up p at 1                 -> p's true destination is 4
       act(2), act(0)  at 2 = p's OTHER dest  -> (5, 2, success=F, ambiguous=T, own_other=T)
       act(4), act(0)  at 4                   -> (5, 4, success=T, ambiguous=T, own_other=F)
@@ -87,12 +96,12 @@ class TestHandChecked(unittest.TestCase):
         DropoffRecord(5, 4, True, False, False),
     ]
     EXPECTED_COUNTS = {
-        "dropoff_attempts": 4,
-        "dropoff_attempts_ambiguous": 2,
-        "dropoff_failures": 2,
-        "dropoff_failures_ambiguous": 1,
-        "dropoff_failures_own_other_dest": 1,
-        "dropoff_empty": 1,
+        DROPOFF_ATTEMPTS: 4,
+        DROPOFF_ATTEMPTS_AMBIGUOUS: 2,
+        DROPOFF_FAILURES: 2,
+        DROPOFF_FAILURES_AMBIGUOUS: 1,
+        DROPOFF_FAILURES_OWN_OTHER: 1,
+        DROPOFF_EMPTY: 1,
     }
 
     def setUp(self):
@@ -115,7 +124,7 @@ class TestHandChecked(unittest.TestCase):
         self.assertEqual(counts_from(sim), zero)
 
         _obs, _r, _d, info = sim.act(0)
-        self.assertEqual(info, dict(zero, dropoff_empty=1))
+        self.assertEqual(info, dict(zero, **{DROPOFF_EMPTY: 1}))
         self.assertEqual(sim.dropoff_records, [])
 
         sim.act(5)
@@ -124,9 +133,9 @@ class TestHandChecked(unittest.TestCase):
         _obs, reward, _d, info = sim.act(0)
         self.assertEqual(reward, sim.rewards["failed-action"])
         self.assertEqual(sim.dropoff_records, self.EXPECTED_RECORDS[:1])
-        self.assertEqual(info, dict(zero, dropoff_empty=1, dropoff_attempts=1, dropoff_attempts_ambiguous=1,
-                                    dropoff_failures=1, dropoff_failures_ambiguous=1,
-                                    dropoff_failures_own_other_dest=1))
+        self.assertEqual(info, {DROPOFF_EMPTY: 1, DROPOFF_ATTEMPTS: 1, DROPOFF_ATTEMPTS_AMBIGUOUS: 1,
+                                DROPOFF_FAILURES: 1, DROPOFF_FAILURES_AMBIGUOUS: 1,
+                                DROPOFF_FAILURES_OWN_OTHER: 1})
 
         sim.act(4)
         _obs, reward, done, _info = sim.act(0)
@@ -285,19 +294,19 @@ def run_planner_driven(convention, mode, seeds, steps_per_seed):
 
 
 def summarise(totals):
-    n_amb = totals["dropoff_attempts_ambiguous"]
-    n_not = totals["dropoff_attempts"] - n_amb
-    fail_amb = totals["dropoff_failures_ambiguous"]
-    fail_not = totals["dropoff_failures"] - fail_amb
+    n_amb = totals[DROPOFF_ATTEMPTS_AMBIGUOUS]
+    n_not = totals[DROPOFF_ATTEMPTS] - n_amb
+    fail_amb = totals[DROPOFF_FAILURES_AMBIGUOUS]
+    fail_not = totals[DROPOFF_FAILURES] - fail_amb
     return {
-        "attempts": totals["dropoff_attempts"],
+        "attempts": totals[DROPOFF_ATTEMPTS],
         "n_amb": n_amb, "p_fail_amb": fail_amb / n_amb if n_amb else float("nan"),
         "n_not": n_not, "p_fail_not": fail_not / n_not if n_not else float("nan"),
-        "failures": totals["dropoff_failures"],
-        "own_other": totals["dropoff_failures_own_other_dest"],
-        "own_other_frac": (totals["dropoff_failures_own_other_dest"] / totals["dropoff_failures"]
-                           if totals["dropoff_failures"] else float("nan")),
-        "empty": totals["dropoff_empty"],
+        "failures": totals[DROPOFF_FAILURES],
+        "own_other": totals[DROPOFF_FAILURES_OWN_OTHER],
+        "own_other_frac": (totals[DROPOFF_FAILURES_OWN_OTHER] / totals[DROPOFF_FAILURES]
+                           if totals[DROPOFF_FAILURES] else float("nan")),
+        "empty": totals[DROPOFF_EMPTY],
     }
 
 
@@ -394,7 +403,7 @@ class TestRealPath(unittest.TestCase):
                 self.assertEqual(episode_info["l"], SHORT_TIMEOUT)
                 for key in DROPOFF_DIAGNOSTIC_KEYS:
                     self.assertEqual(episode_info[key], finished_sim.dropoff_counts[key], key)
-                self.assertGreater(episode_info["dropoff_attempts"], 0)
+                self.assertGreater(episode_info[DROPOFF_ATTEMPTS], 0)
             env.close()
 
     def test_counts_logged_as_progress_keys_during_learn(self):
@@ -427,6 +436,49 @@ class TestRealPath(unittest.TestCase):
             self.assertIn(f"progress/{key}", recorded, key)
             for ep_info in model.ep_info_buffer:
                 self.assertIn(key, ep_info)
+
+        # Everything learn() recorded, rendered by the fork's own stdout table: every
+        # diagnostic key must print in full, exactly once.
+        rows = printed_table_rows({key: value for key, value in recorded.items() if not isinstance(value, th.Tensor)})
+        for key in DROPOFF_DIAGNOSTIC_KEYS:
+            self.assertEqual(sum(1 for row_key, _value in rows if row_key == key), 1, f"{key} not printed exactly once")
+
+
+def printed_table_rows(key_values):
+    """(key, value) pairs of the table the SB3 fork's HumanOutputFormat prints for
+    key_values -- the printed log the training chart script reads. Keys are shown
+    without their "progress/"-style group prefix, after the logger's own truncation."""
+    out = io.StringIO()
+    HumanOutputFormat(out).write(key_values, {key: None for key in key_values})
+    rows = []
+    for line in out.getvalue().splitlines():
+        if line.startswith("|"):
+            _left, key, value, _right = line.split("|")
+            rows.append((key.strip(), value.strip()))
+    return rows
+
+
+class TestLoggedKeysSurviveTruncation(unittest.TestCase):
+    """The fork's printed table shows a key's part after its first "/" indented by 3
+    spaces, truncated to 23 characters, and stores rows in a dict keyed by the truncated
+    text -- so a key longer than 20 characters is cut, and two that cut alike overwrite
+    each other (the bug that hid one of the old dropoff_failures_* keys)."""
+
+    def test_each_diagnostic_key_prints_in_full_and_once(self):
+        key_values = {"rollout/ep_rew_mean": 0.5, "rollout/ep_len_mean": 100.0}
+        expected = {}
+        for i, key in enumerate(DROPOFF_DIAGNOSTIC_KEYS):
+            key_values[f"progress/{key}"] = 1000 + i  # distinct values expose an overwrite
+            expected[key] = str(1000 + i)
+        rows = printed_table_rows(key_values)
+        for key, value in expected.items():
+            matches = [row_value for row_key, row_value in rows if row_key == key]
+            self.assertEqual(matches, [value], f"progress/{key}: printed rows {rows}")
+
+    def test_display_keys_fit_without_truncation(self):
+        displayed = ["   " + key for key in DROPOFF_DIAGNOSTIC_KEYS]
+        self.assertEqual([HumanOutputFormat._truncate(d) for d in displayed], displayed)
+        self.assertEqual(len(set(displayed)), len(displayed))
 
 
 # ==========================================================================================

@@ -42,18 +42,30 @@ DEFAULT_REWARDS = {"base": 0, "failed-action": 0, "drop-off": 1}
 
 # Ambiguous-delivery diagnostic: per-episode counters, returned in act()'s info dict on
 # every call (so Monitor's info_keywords pick up the totals on whichever step ends the
-# episode). A dropoff with nobody aboard counts ONLY towards dropoff_empty; every other
+# episode). A dropoff with nobody aboard counts ONLY towards DROPOFF_EMPTY; every other
 # counter refers to dropoffs attempted while carrying a passenger. "ambiguous" means the
 # OBJECT encoding of the true state has more than one valid hypothesis for the carried
 # passenger's cluster (ternary_planner.object_hypothesis_count > 1) -- computed whatever
 # graph convention the env actually uses, so it measures exposure to the ambiguity.
+#
+# Key names are kept short on purpose: training logs them as "progress/<key>", and the
+# SB3 fork's printed table (logger.HumanOutputFormat) shows the part after the first "/"
+# indented by 3 spaces and truncates to 23 characters, so each key must be at most 20
+# characters to print in full -- and keys that truncate alike overwrite each other in the
+# table. tests/test_ternary_diagnostic.py checks every key survives the truncation.
+DROPOFF_ATTEMPTS = "dropoff/attempts"              # dropoffs attempted while carrying
+DROPOFF_ATTEMPTS_AMBIGUOUS = "dropoff/att_amb"     # ... of which object-ambiguous
+DROPOFF_FAILURES = "dropoff/fails"                 # ... of which failed
+DROPOFF_FAILURES_AMBIGUOUS = "dropoff/fail_amb"    # failed and object-ambiguous
+DROPOFF_FAILURES_OWN_OTHER = "dropoff/fail_own"    # failed at one of the passenger's own other destinations
+DROPOFF_EMPTY = "dropoff/empty"                    # dropoff with nobody aboard
 DROPOFF_DIAGNOSTIC_KEYS = (
-    "dropoff_attempts",
-    "dropoff_attempts_ambiguous",
-    "dropoff_failures",
-    "dropoff_failures_ambiguous",
-    "dropoff_failures_own_other_dest",
-    "dropoff_empty",
+    DROPOFF_ATTEMPTS,
+    DROPOFF_ATTEMPTS_AMBIGUOUS,
+    DROPOFF_FAILURES,
+    DROPOFF_FAILURES_AMBIGUOUS,
+    DROPOFF_FAILURES_OWN_OTHER,
+    DROPOFF_EMPTY,
 )
 
 # facts() emits type atoms (one per object) first, in ascending object-id order --
@@ -377,7 +389,7 @@ class TernaryTaxiWorldSimulator(object):
         """
         pid = self.taxi.passenger
         if pid is None:
-            self.dropoff_counts["dropoff_empty"] += 1
+            self.dropoff_counts[DROPOFF_EMPTY] += 1
             return self.rewards["failed-action"]
         passenger = self.passengers[pid]
         matching_destinations = [
@@ -420,15 +432,15 @@ class TernaryTaxiWorldSimulator(object):
             DropoffRecord(int(pid), int(self.taxi.location), success, object_ambiguous, own_other_dest)
         )
         counts = self.dropoff_counts
-        counts["dropoff_attempts"] += 1
+        counts[DROPOFF_ATTEMPTS] += 1
         if object_ambiguous:
-            counts["dropoff_attempts_ambiguous"] += 1
+            counts[DROPOFF_ATTEMPTS_AMBIGUOUS] += 1
         if not success:
-            counts["dropoff_failures"] += 1
+            counts[DROPOFF_FAILURES] += 1
             if object_ambiguous:
-                counts["dropoff_failures_ambiguous"] += 1
+                counts[DROPOFF_FAILURES_AMBIGUOUS] += 1
             if own_other_dest:
-                counts["dropoff_failures_own_other_dest"] += 1
+                counts[DROPOFF_FAILURES_OWN_OTHER] += 1
 
     def _attempt_move(self, action):
         start = self.taxi.location
