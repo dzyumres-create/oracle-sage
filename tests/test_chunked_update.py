@@ -11,7 +11,10 @@ Run from the repo root with:
     PYTHONPATH=. python -m pytest tests/test_chunked_update.py -v -s
 Do not run while a training run is using the GPU.
 """
+import contextlib
 import copy
+import os
+import subprocess
 import unittest
 from unittest import mock
 
@@ -234,6 +237,13 @@ def max_rel_logged(a, b):
     return max(abs(a[k] - b[k]) / max(abs(a[k]), 1e-12) for k in a)
 
 
+def worst_logged(a, b, rtol, atol):
+    """The logged key closest to failing |a - b| <= atol + rtol * |b|, as
+    (key, |a - b|, atol + rtol * |b|)."""
+    rows = [(k, abs(a[k] - b[k]), atol + rtol * abs(b[k])) for k in a]
+    return max(rows, key=lambda row: row[1] / row[2])
+
+
 def to_float64(model, snapshot):
     """Switches the update to float64 end to end: parameters (and the snapshot's copy of
     them), a fresh optimizer over the double parameters, the features extractor's inputs
@@ -269,6 +279,32 @@ def assert_same_rng(test, a, b):
             test.assertEqual(x, y, "numpy RNG state differs after the update")
 
 
+def assert_bitwise_equal(test, a, b, what):
+    """Two run_update results: same gradients, parameters, logged values and RNG states,
+    bit for bit."""
+    test.assertEqual(set(a["grads"]), set(b["grads"]), what)
+    for name in a["grads"]:
+        test.assertTrue(th.equal(a["grads"][name], b["grads"][name]), f"{what}: grad {name}")
+    for name in a["params"]:
+        test.assertTrue(th.equal(a["params"][name], b["params"][name]), f"{what}: param {name}")
+    test.assertEqual(a["logged"], b["logged"], what)
+    assert_same_rng(test, a, b)
+
+
+@contextlib.contextmanager
+def single_cpu_thread():
+    """With several CPU threads, some reduction kernels sum in a run-dependent order for
+    some tensor sizes, so the same update isn't bitwise reproducible run to run (seen
+    on the Mac for chunked updates, and on RCP -- torch 1.7.1, 8 cores -- for the
+    unchunked one). One thread makes the order fixed."""
+    threads = th.get_num_threads()
+    th.set_num_threads(1)
+    try:
+        yield
+    finally:
+        th.set_num_threads(threads)
+
+
 # ==========================================================================================
 # Default unchanged: update_chunks=1 is the old train(), bit for bit (any stack, no skip)
 # ==========================================================================================
@@ -283,15 +319,16 @@ class TestDefaultUnchanged(unittest.TestCase):
         cls.env.close()
 
     def test_update_chunks_1_bitwise_identical_to_original_train(self):
-        reference = run_update(self.model, self.snapshot, 1, reference=True)
-        new = run_update(self.model, self.snapshot, 1)
-        self.assertEqual(set(reference["grads"]), set(new["grads"]))
-        for name in reference["grads"]:
-            self.assertTrue(th.equal(reference["grads"][name], new["grads"][name]), f"grad {name}")
-        for name in reference["params"]:
-            self.assertTrue(th.equal(reference["params"][name], new["params"][name]), f"param {name}")
-        self.assertEqual(reference["logged"], new["logged"])
-        assert_same_rng(self, reference, new)
+        """Single-threaded (see single_cpu_thread; multi-threaded, this failed on RCP).
+        The control runs the reference train() twice first: if that differs, the run
+        itself isn't reproducible here, and the main comparison would mean nothing."""
+        with single_cpu_thread():
+            reference = run_update(self.model, self.snapshot, 1, reference=True)
+            control = run_update(self.model, self.snapshot, 1, reference=True)
+            new = run_update(self.model, self.snapshot, 1)
+        assert_bitwise_equal(self, reference, control,
+                             "control: reference train() differs from itself (nondeterminism, not a code difference)")
+        assert_bitwise_equal(self, reference, new, "update_chunks=1 differs from the reference train()")
 
     def test_update_chunks_1_never_enters_chunked_path(self):
         with mock.patch.object(self.model, "_train_chunked") as chunked:
@@ -324,6 +361,18 @@ class TestChunkedEquivalence(unittest.TestCase):
 
     N_ENVS, N_STEPS = 4, 5  # B = 20; N = 7 gives uneven chunks (3,3,3,3,3,3,2), N = B one graph each
 
+    # float32 logged values. A relative check alone fails on keys that are small
+    # differences of larger float32 quantities: value_loss is a mean of squared residuals
+    # (returns - values), ~1e-4 here, while the rounding of the value predictions scales
+    # with |values|, so its relative error is amplified (measured ~3e-6 on the Mac; on
+    # RCP a logged value reached 2.05e-5 at N = 7 while the whole-gradient difference was
+    # ~9e-8). Every other key stays <= 2e-7 relative on the Mac. RTOL matches the
+    # whole-gradient tolerance; ATOL is a floor for values near zero (value_loss's
+    # measured absolute difference is ~2e-10). Neither is what would catch a logic error
+    # such as a wrong chunk weight: the float64 test is, with relative 1e-12 on the same
+    # logged values.
+    LOGGED_RTOL, LOGGED_ATOL = 1e-4, 1e-6
+
     @classmethod
     def setUpClass(cls):
         cls.env, cls.model, cls.snapshot = build_model_with_rollout(n_envs=cls.N_ENVS, n_steps=cls.N_STEPS)
@@ -354,9 +403,10 @@ class TestChunkedEquivalence(unittest.TestCase):
         Parameters: within one learning-rate step -- AdamW's first step moves each
         weight by lr * g / (|g| + eps), about +-lr however small g is, so rounding noise
         on a near-zero gradient element can move it by up to lr; the gradient checks,
-        not this one, are what would catch a wrong chunk weight. Logged values: relative
-        1e-5. RNG states: identical (the evaluate path's discarded multinomial draws
-        happen once per graph, in the same order)."""
+        not this one, are what would catch a wrong chunk weight. Logged values:
+        |a - b| <= LOGGED_ATOL + LOGGED_RTOL * |b| (see LOGGED_RTOL). RNG states:
+        identical (the evaluate path's discarded multinomial draws happen once per graph,
+        in the same order)."""
         self._table(self.float32, "float32")
         base = self.float32[1]
         for n in self.chunk_counts:
@@ -366,7 +416,8 @@ class TestChunkedEquivalence(unittest.TestCase):
                 self.assertLessEqual(whole_grad_rel(base["grads"], r["grads"]), 1e-4)
                 self.assertLessEqual(max_abs(base["params"], r["params"]), self.lr)
                 self.assertEqual(set(base["logged"]), set(r["logged"]))
-                self.assertLessEqual(max_rel_logged(base["logged"], r["logged"]), 1e-5)
+                key, diff, bound = worst_logged(r["logged"], base["logged"], self.LOGGED_RTOL, self.LOGGED_ATOL)
+                self.assertLessEqual(diff, bound, f"logged {key}: |diff| {diff:.2e} > {bound:.2e}")
                 assert_same_rng(self, base, r)
 
     def test_float64_matches_to_rounding(self):
@@ -390,19 +441,67 @@ class TestChunkedEquivalence(unittest.TestCase):
 # CUDA: lower peak memory in a small configuration where N=1 also fits
 # ==========================================================================================
 
+def free_gpu_memory_bytes():
+    """Free memory on the current CUDA device as the driver reports it, i.e. net of other
+    processes, or None if it can't be determined. This process's cached blocks are
+    released first so they count as free. th.cuda.mem_get_info doesn't exist in torch
+    1.7, so there it asks nvidia-smi, for the GPU named by CUDA_VISIBLE_DEVICES (an
+    index or a UUID) or, if unset, the GPU with the device's index -- which assumes
+    nvidia-smi and CUDA order GPUs alike, true unless a machine mixes GPU models -- or,
+    if nvidia-smi sees exactly one GPU (a container), that one."""
+    th.cuda.empty_cache()
+    if hasattr(th.cuda, "mem_get_info"):
+        return th.cuda.mem_get_info()[0]
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid,memory.free", "--format=csv,noheader,nounits"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    gpus = [[field.strip() for field in line.split(",")] for line in out.strip().splitlines()]
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    device = th.cuda.current_device()
+    wanted = visible.split(",")[device].strip() if visible else str(device)
+    for index, uuid, free_mib in gpus:
+        if wanted in (index, uuid):
+            return int(free_mib) * 2**20
+    return int(gpus[0][2]) * 2**20 if len(gpus) == 1 else None
+
+
 class TestChunkedMemoryCuda(unittest.TestCase):
+    # The N = 1 update below peaks at ~1.6 GiB (measured on the Mac as the process's
+    # peak-RSS increase on CPU, same tensors), plus the caching allocator's rounding,
+    # the CUDA context and cuBLAS workspaces (none counted by max_memory_allocated).
+    REQUIRED_FREE_GIB = 3.0
+
     @unittest.skipIf(not CUDA, "requires CUDA")
     def test_peak_memory_lower_and_gradients_close(self):
-        env, model, snapshot = build_model_with_rollout(n_envs=8, n_steps=5, device="cuda")
-        peaks = {}
-        results = {}
-        for n in (1, 4):
-            th.cuda.synchronize()
-            th.cuda.reset_peak_memory_stats()
-            results[n] = run_update(model, snapshot, n)
-            th.cuda.synchronize()
-            peaks[n] = th.cuda.max_memory_allocated()
-        env.close()
+        """Fails, rather than skips, when other processes leave too little GPU memory,
+        with that as the message instead of a cryptic cuBLAS error."""
+        free = free_gpu_memory_bytes()
+        if free is None:
+            self.fail("cannot determine free GPU memory (no th.cuda.mem_get_info, nvidia-smi unavailable "
+                      "or doesn't identify this GPU)")
+        if free < self.REQUIRED_FREE_GIB * 2**30:
+            self.fail(f"insufficient free GPU memory: other processes are using it "
+                      f"({free / 2**30:.2f} GiB free, this test needs {self.REQUIRED_FREE_GIB:g} GiB)")
+        try:
+            env, model, snapshot = build_model_with_rollout(n_envs=8, n_steps=5, device="cuda")
+            peaks = {}
+            results = {}
+            for n in (1, 4):
+                th.cuda.synchronize()
+                th.cuda.reset_peak_memory_stats()
+                results[n] = run_update(model, snapshot, n)
+                th.cuda.synchronize()
+                peaks[n] = th.cuda.max_memory_allocated()
+            env.close()
+        except RuntimeError as error:
+            if "out of memory" not in str(error) and "ALLOC_FAILED" not in str(error):
+                raise
+            self.fail(f"ran out of GPU memory although {free / 2**30:.2f} GiB were free at the start: other "
+                      f"processes probably took memory meanwhile ({error})")
         rel = whole_grad_rel(results[1]["grads"], results[4]["grads"])
         print(f"\n[chunked memory, CUDA, B=40] peak during train(): N=1 {peaks[1] / 2**30:.3f} GiB, "
               f"N=4 {peaks[4] / 2**30:.3f} GiB; whole-gradient relative diff {rel:.2e}")
