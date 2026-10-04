@@ -119,6 +119,22 @@ def main(arglist):
              "the planner receives the true facts. Ternary env with --graph-convention oracle_sage "
              "only; appends '" + ORACLE_DECODER_SUFFIX + "' to --save-dir and --log-dir.",
     )
+    parser.add_argument(
+        "--update-chunks",
+        type=int,
+        default=1,
+        help="split each training update's forward/backward into this many chunks, accumulating "
+             "gradients before a single clipped step -- same gradient, lower peak memory "
+             "(default: 1, the original single-pass update). Requires --feedback.",
+    )
+    parser.add_argument(
+        "--log-grad-norms",
+        action="store_true",
+        default=False,
+        help="log the gradient norms going into each update's gradient clipping "
+             "(train/grad_norm_head, grad_norm_train, grad_norm_total, clip_coef). Logging only; "
+             "does not change training. Requires --feedback.",
+    )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
         "--learning-rate", type=float, default=0.00025, help="learning rate"
@@ -288,6 +304,14 @@ def main(arglist):
     )
 
     args = parser.parse_args(arglist)
+    if args.update_chunks < 1:
+        raise ValueError(f"--update-chunks must be >= 1, got {args.update_chunks}")
+    if args.update_chunks != 1 and not args.feedback:
+        raise ValueError("--update-chunks is only implemented for the feedback algorithms (Feedback_A2C / "
+                         "PlanFeedback_A2C); pass --feedback, or leave --update-chunks at 1")
+    if args.log_grad_norms and not args.feedback:
+        raise ValueError("--log-grad-norms is only implemented for the feedback algorithms (Feedback_A2C / "
+                         "PlanFeedback_A2C); pass --feedback")
     if args.oracle_decoder:
         validate_oracle_decoder(args.env_name, args.graph_convention)
         args.save_dir = oracle_decoder_dir(args.save_dir)
@@ -341,6 +365,11 @@ def main(arglist):
         # policy_kwargs=dict(
         # ),
     )
+    # Only passed when chunking is requested, so a default run builds exactly the same model
+    if args.update_chunks != 1:
+        variant["algorithm_kwargs"]["update_chunks"] = args.update_chunks
+    if args.log_grad_norms:
+        variant["algorithm_kwargs"]["log_grad_norms"] = True
     # optionally set the GPU (default=False)
     run(variant)
 
