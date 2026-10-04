@@ -35,8 +35,9 @@ STATES = os.path.join(HERE, "results", "states")
 OUT = os.path.join(HERE, "results", "scores")
 K_DRAWS = 20
 # Cell 1-fixed (GNN, both fixes, trained on the fixed simulator) is scored on the fixed simulator
-MODEL_TREE = {"cell1": "main", "cell3": "head", "cell1fixed": "head"}
-TORCH_SEED_BASE = {"cell1": 1, "cell3": 3, "cell1fixed": 2}
+MODEL_TREE = {"cell1": "main", "cell3": "head", "cell1fixed": "head",
+              "cell1_s300": "main", "cell3_s300": "head"}   # extra training seeds (audit)
+TORCH_SEED_BASE = {"cell1": 1, "cell3": 3, "cell1fixed": 2, "cell1_s300": 4, "cell3_s300": 5}
 
 
 def sub(tree, *args):
@@ -193,17 +194,20 @@ def run(args):
 
 
 def run_model(args):
-    """Score one additional model on the existing snapshots (e.g. Cell 1-fixed), sharded."""
+    """Score one additional model on the existing snapshots (e.g. Cell 1-fixed), sharded.
+    Output goes to --out-dir (default: results/scores)."""
     W = args.workers
+    out_dir = os.path.abspath(args.out_dir) if args.out_dir else OUT  # workers run with cwd = their tree root
+    os.makedirs(out_dir, exist_ok=True)
     jobs = [(MODEL_TREE[args.model], ["model", "--model", args.model, "--zip", args.zip, "--shard", str(i), "--of", str(W),
-                                      "--out", os.path.join(OUT, f"{args.model}_{i}.json")]) for i in range(W)]
+                                      "--out", os.path.join(out_dir, f"{args.model}_{i}.json")]) for i in range(W)]
     with ThreadPoolExecutor(W) as ex:
         for r in ex.map(lambda j: sub(j[0], *j[1]), jobs):
             print(r)
     merged = {}
     for i in range(W):
-        merged.update(json.load(open(os.path.join(OUT, f"{args.model}_{i}.json"))))
-    json.dump(merged, open(os.path.join(OUT, f"{args.model}.json"), "w"))
+        merged.update(json.load(open(os.path.join(out_dir, f"{args.model}_{i}.json"))))
+    json.dump(merged, open(os.path.join(out_dir, f"{args.model}.json"), "w"))
     print(f"{args.model}: {len(merged)} states")
 
 
@@ -212,6 +216,7 @@ def main():
     sp = ap.add_subparsers(dest="mode", required=True)
     rm = sp.add_parser("run-model"); rm.add_argument("--model", required=True, choices=sorted(MODEL_TREE))
     rm.add_argument("--zip", required=True); rm.add_argument("--workers", type=int, default=4)
+    rm.add_argument("--out-dir", default=None)
     r = sp.add_parser("run"); r.add_argument("--cell1-zip", required=True); r.add_argument("--cell3-zip", required=True)
     r.add_argument("--workers", type=int, default=4)
     s = sp.add_parser("snapshot"); s.add_argument("--tree", required=True); s.add_argument("--out", required=True)
