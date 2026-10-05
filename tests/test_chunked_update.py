@@ -470,15 +470,27 @@ def free_gpu_memory_bytes():
 
 
 class TestChunkedMemoryCuda(unittest.TestCase):
-    # The N = 1 update below peaks at ~1.6 GiB (measured on the Mac as the process's
-    # peak-RSS increase on CPU, same tensors), plus the caching allocator's rounding,
-    # the CUDA context and cuBLAS workspaces (none counted by max_memory_allocated).
+    # The N = 1 update below peaks at 2.15 GiB (max_memory_allocated on RCP; ~1.6 GiB
+    # estimated on the Mac from the CPU peak RSS), plus the CUDA context and cuBLAS
+    # workspaces, which max_memory_allocated doesn't count.
     REQUIRED_FREE_GIB = 3.0
 
     @unittest.skipIf(not CUDA, "requires CUDA")
     def test_peak_memory_lower_and_gradients_close(self):
         """Fails, rather than skips, when other processes leave too little GPU memory,
-        with that as the message instead of a cryptic cuBLAS error."""
+        with that as the message instead of a cryptic cuBLAS error.
+
+        Memory: the peak at N = 4 must be under half the peak at N = 1 (measured on
+        RCP: 0.555 vs 2.152 GiB).
+
+        Gradients: N = 4 vs N = 1 whole-gradient relative difference <=
+        max(1e-3, 10 * control), where the control is N = 1 run twice from the same
+        snapshot, i.e. the GPU's own run-to-run noise. GPU float32 rounding is larger
+        than on CPU: CUDA scatter-add sums are non-deterministic, and torch 1.7+ may run
+        matmuls and convolutions in TF32 on Ampere or newer GPUs (10-bit mantissa; the
+        flags are printed), so RCP measured 1.46e-4 where the CPU gives ~1e-5. This
+        check only guards against gross errors; exactness of the chunked gradient is
+        established by the CPU float64 test (TestChunkedEquivalence, relative 1e-12)."""
         free = free_gpu_memory_bytes()
         if free is None:
             self.fail("cannot determine free GPU memory (no th.cuda.mem_get_info, nvidia-smi unavailable "
@@ -490,27 +502,32 @@ class TestChunkedMemoryCuda(unittest.TestCase):
             env, model, snapshot = build_model_with_rollout(n_envs=8, n_steps=5, device="cuda")
             peaks = {}
             results = {}
-            for n in (1, 4):
+            for run, n in (("N=1", 1), ("N=1 control", 1), ("N=4", 4)):
                 th.cuda.synchronize()
                 th.cuda.reset_peak_memory_stats()
-                results[n] = run_update(model, snapshot, n)
+                results[run] = run_update(model, snapshot, n)
                 th.cuda.synchronize()
-                peaks[n] = th.cuda.max_memory_allocated()
+                peaks[run] = th.cuda.max_memory_allocated()
             env.close()
         except RuntimeError as error:
             if "out of memory" not in str(error) and "ALLOC_FAILED" not in str(error):
                 raise
             self.fail(f"ran out of GPU memory although {free / 2**30:.2f} GiB were free at the start: other "
                       f"processes probably took memory meanwhile ({error})")
-        rel = whole_grad_rel(results[1]["grads"], results[4]["grads"])
-        print(f"\n[chunked memory, CUDA, B=40] peak during train(): N=1 {peaks[1] / 2**30:.3f} GiB, "
-              f"N=4 {peaks[4] / 2**30:.3f} GiB; whole-gradient relative diff {rel:.2e}")
-        self.assertLess(peaks[4], peaks[1])
-        # float32 tolerance as on CPU (TestChunkedEquivalence.test_float32); GPU scatter-add
-        # sums are also not bitwise reproducible run to run
-        self.assertLessEqual(rel, 1e-4)
-        self.assertIn("train/max_mem_gb", results[4]["logged"])
-        self.assertNotIn("train/max_mem_gb", results[1]["logged"])
+        control = whole_grad_rel(results["N=1"]["grads"], results["N=1 control"]["grads"])
+        rel = whole_grad_rel(results["N=1"]["grads"], results["N=4"]["grads"])
+        tolerance = max(1e-3, 10 * control)
+        print(f"\n[chunked memory, CUDA, B=40] peak during train(): N=1 {peaks['N=1'] / 2**30:.3f} GiB, "
+              f"N=4 {peaks['N=4'] / 2**30:.3f} GiB")
+        print(f"   whole-gradient relative diff: N=4 vs N=1 {rel:.2e}; control (N=1 twice) {control:.2e}; "
+              f"tolerance {tolerance:.2e}")
+        print(f"   TF32: torch.backends.cuda.matmul.allow_tf32 = "
+              f"{getattr(th.backends.cuda.matmul, 'allow_tf32', 'n/a')}, "
+              f"torch.backends.cudnn.allow_tf32 = {getattr(th.backends.cudnn, 'allow_tf32', 'n/a')}")
+        self.assertLess(peaks["N=4"], 0.5 * peaks["N=1"])
+        self.assertLessEqual(rel, tolerance)
+        self.assertIn("train/max_mem_gb", results["N=4"]["logged"])
+        self.assertNotIn("train/max_mem_gb", results["N=1"]["logged"])
 
 
 # ==========================================================================================
