@@ -78,7 +78,6 @@ def fmt_block(rows):
     d = np.concatenate([r["delta"] for r in rows]) if rows else np.array([])
     npk = sum(sum(r["nonpass"].values()) for r in rows)
     tot = sum(len(r["picks"]) for r in rows)
-    pg = [r["picked_given"] for r in rows if r["picked_given"] is not None]
     return dict(
         states=len(rows), M1_mean=d.mean(), M1_median=float(np.median(d)), M1_zero=100 * np.mean(d == 0),
         nonpass_pct=100 * npk / tot,
@@ -86,7 +85,9 @@ def fmt_block(rows):
         disc_best_M1=np.mean([r["disc_best_delta"] for r in rows]),
         proposed=100 * np.mean([r["proposed"] for r in rows]),
         uniform=100 * np.mean([r["uniform_actor_proposed"] for r in rows]),
-        picked_given=100 * np.mean(pg), picked=100 * np.mean([r["picked"] for r in rows]),
+        # pooled over draws (every state has the same number of draws), so proposed x picked|prop = picked
+        picked_given=100 * sum(r["picked"] for r in rows) / sum(r["proposed"] for r in rows),
+        picked=100 * np.mean([r["picked"] for r in rows]),
         mass_pass=100 * np.mean([r["actor_mass_pass"] for r in rows]),
         mass_short=100 * np.mean([r["actor_mass_short"] for r in rows]),
         ties=100 * np.mean([r["ties"] for r in rows]),
@@ -159,8 +160,8 @@ def main():
              "Columns: M1 = selected plan length - shortest passenger plan (passenger picks only); non-pass% = picks that are",
              "move/no-op; greedy/rand-pass/disc-best = M1 of greedy's choice, of a uniformly random passenger, and of the",
              "discriminator's top-scored passenger over ALL passengers; proposed% = shortest-plan passenger among the 3",
-             "candidates (unif = same for a uniform actor over all nodes); picked|prop% = discriminator picked it when proposed",
-             "(random = 33%); mass = actor probability on all passengers / on the shortest one(s)."]
+             "candidates (unif = same for a uniform actor over all nodes); picked|prop% = discriminator picked it when proposed,",
+             "pooled over draws (random = 33%); '=0 %' is a share of passenger picks only; mass = actor probability on all passengers / on the shortest one(s)."]
     for m in MODELS:
         R = rows[m]
         groups = [("all", R)] + [(f"bucket {b}", [r for r in R if r["bucket"] == b]) for b in ("early", "middle", "late")] \
@@ -295,8 +296,10 @@ def pick_examples(states, gt, rows, w):
             add(sid, f"Cell 3: shortest passenger shares its WL histogram with a longer passenger "
                      f"(full input distinguishable: {w['full_key_short_distinct'][sid]})")
             break
-    # 3. shortest proposed but not picked (most often), one per model
-    for m in MODELS:
+    # 3. shortest proposed but not picked (most often), one per model; examples (and the figures built
+    # from them) compare Cell 1 and Cell 3 only, so later models don't change the figure set
+    FIG = ("cell1", "cell3")
+    for m in FIG:
         cand = sorted(ids, key=lambda sid: -(by[m][sid]["proposed"] * (1 - (by[m][sid]["picked_given"] or 1))))
         sid = cand[0]
         add(sid, f"{NAMES[m]}: shortest proposed in {100 * by[m][sid]['proposed']:.0f}% of draws but picked only "
@@ -308,7 +311,7 @@ def pick_examples(states, gt, rows, w):
             add(sid, "both models pick the shortest passenger in >80% of draws (late, crowded)")
             break
     # 5. a model picks a move/no-op goal often
-    for m in MODELS:
+    for m in FIG:
         for sid in ids:
             if sum(by[m][sid]["nonpass"].values()) >= 10:
                 add(sid, f"{NAMES[m]} picks non-passenger goals in {sum(by[m][sid]['nonpass'].values())}/20 draws "
