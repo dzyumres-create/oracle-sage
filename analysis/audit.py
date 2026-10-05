@@ -29,8 +29,10 @@ from scipy.stats import spearmanr
 HERE = os.path.dirname(os.path.abspath(__file__))
 SC = os.path.join(HERE, "results", "scores")
 OUT = os.path.join(HERE, "results", "audit")
-NAMES = {"cell1": "Cell 1 (GNN) s0", "cell3": "Cell 3 (WL) s0",
+NAMES = {"cell1": "Cell 1 (GNN) s0", "cell3": "Cell 3 (WL) s0", "cell1fixed": "Cell 1-fixed s0",
          "cell1_s300": "Cell 1 (GNN) s300", "cell3_s300": "Cell 3 (WL) s300"}
+MAIN = ("cell1", "cell1fixed", "cell3")
+PAIRS = (("cell1", "cell3"), ("cell1fixed", "cell1"), ("cell1fixed", "cell3"))
 
 
 def model_path(m):
@@ -99,7 +101,8 @@ HEADLINE = [  # (name, function of the per-state arrays T and index array idx)
 
 
 # ------------------------------------------------------------------ 1. attribution
-def attribution(models=("cell1", "cell3")):
+def attribution(models=MAIN):
+    models = [m for m in models if model_path(m)]
     states, gt, mods = load(models)
     lines = ["# 1. Attribution rates, pooled over draws",
              "Shortest = all passengers tied at the minimum total plan length (tied passengers all count).",
@@ -136,7 +139,9 @@ def attribution(models=("cell1", "cell3")):
 
 
 # ------------------------------------------------------------------ 2. bootstrap
-def bootstrap(models=("cell1", "cell3"), B=1000, seed=0):
+def bootstrap(models=MAIN, B=1000, seed=0):
+    models = [m for m in models if model_path(m)]
+    pairs = [p for p in PAIRS if p[0] in models and p[1] in models]
     states, gt, mods = load(models)
     Ts = {m: table(states, gt, mods[m]) for m in models}
     n = len(states)
@@ -144,38 +149,41 @@ def bootstrap(models=("cell1", "cell3"), B=1000, seed=0):
     idx = [rng.randint(n, size=n) for _ in range(B)]
     full = np.arange(n)
     lines = [f"# 2. Bootstrap 95% CIs ({B} resamples of the {n} states, percentile method; pooled ratios recomputed "
-             "per resample). Diff = Cell 1 - Cell 3 on the same resampled states.", "",
-             f"{'metric':48s} " + " ".join(f"{NAMES[m]:>24s}" for m in models) + f" {'diff (paired)':>24s}"]
+             "per resample). Differences are paired: both models on the same resampled states.", ""]
     out = {}
     for name, f in HEADLINE:
-        cells = []
+        lines.append(name)
         vals = {}
         for m in models:
             est = f(Ts[m], full)
             bs = np.array([f(Ts[m], i) for i in idx])
             vals[m] = bs
             lo, hi = np.percentile(bs, [2.5, 97.5])
-            cells.append(f"{est:7.2f} [{lo:6.2f}, {hi:6.2f}]")
+            lines.append(f"    {NAMES[m]:28s} {est:8.2f} [{lo:7.2f}, {hi:7.2f}]")
             out.setdefault(name, {})[m] = (est, lo, hi)
-        dd = vals[models[0]] - vals[models[1]]
-        est_d = f(Ts[models[0]], full) - f(Ts[models[1]], full)
-        lo, hi = np.percentile(dd, [2.5, 97.5])
-        cells.append(f"{est_d:7.2f} [{lo:6.2f}, {hi:6.2f}]")
-        lines.append(f"{name:48s} " + " ".join(f"{c:>24s}" for c in cells))
+        for a, b in pairs:
+            dd = vals[a] - vals[b]
+            lo, hi = np.percentile(dd, [2.5, 97.5])
+            est_d = f(Ts[a], full) - f(Ts[b], full)
+            lines.append(f"    diff {NAMES[a]} - {NAMES[b]:16s} {est_d:8.2f} [{lo:7.2f}, {hi:7.2f}]")
+            out[name][f"{a}-{b}"] = (est_d, lo, hi)
     # episode-level deliveries (10 episodes each), resampling episodes
     lines += ["", "Deliveries per episode (bootstrap over the 10 episodes, seeds 100-109):"]
     ep = {"Cell 1 own simulator": os.path.join(HERE, "results", "eval", "cell1_own.json"),
           "Cell 3 fixed simulator": os.path.join(HERE, "results", "eval", "cell3_fixed.json"),
           "Cell 1 fixed simulator": os.path.join(HERE, "results", "eval", "cell1_fixed.json"),
+          "Cell 1-fixed fixed simulator": os.path.join(HERE, "results", "eval", "cell1fixed_fixed.json"),
           "greedy": os.path.join(HERE, "results", "step4", "greedy_head.json"),
-          "shortest-plan": os.path.join(OUT, "3_shortest_plan.json")}
+          "shortest-plan": os.path.join(OUT, "3_shortest_plan.json"),
+          "best of 3 random passengers": os.path.join(OUT, "5_best_of_3.json"),
+          "random passenger": os.path.join(OUT, "5_random_passenger.json")}
     for name, p in ep.items():
         if not os.path.exists(p):
             continue
         d = np.array([r["delivered"] for r in json.load(open(p))], float)
         bs = np.array([d[rng.randint(len(d), size=len(d))].mean() for _ in range(B)])
         lo, hi = np.percentile(bs, [2.5, 97.5])
-        lines.append(f"  {name:24s} {d.mean():6.1f} [{lo:5.1f}, {hi:5.1f}]")
+        lines.append(f"  {name:30s} {d.mean():6.1f} [{lo:5.1f}, {hi:5.1f}]  (sd {d.std(ddof=1):.1f}, range {int(d.min())}-{int(d.max())})")
     txt = "\n".join(lines)
     open(os.path.join(OUT, "2_bootstrap.txt"), "w").write(txt)
     json.dump(out, open(os.path.join(OUT, "2_bootstrap.json"), "w"), indent=1)
@@ -183,18 +191,30 @@ def bootstrap(models=("cell1", "cell3"), B=1000, seed=0):
 
 
 # ------------------------------------------------------------------ 3. shortest-plan policy
-def shortest_episode(seed):
+def reference_episode(seed, rule="shortest"):
+    """Plan-level reference policy, plans run open-loop like the models. rule:
+       shortest  - passenger with the shortest total plan (ties -> lowest node id)
+       best3     - 3 distinct waiting passengers sampled uniformly (all if fewer), shortest of them
+       random    - one waiting passenger uniformly
+    No waiting passenger -> 1-frame no-op. Sampling RNG: RandomState(seed), separate from the env's."""
     from analysis.envs import make_env, obs_to_data, plan
     from analysis.goals import classify_goals
     env, obs = make_env(seed)
+    rng = np.random.RandomState(seed)
     done, decisions, frames, noops = False, 0, 0, 0
     while not done:
         data = obs_to_data(obs)
         types = classify_goals(data)
         P = [i for i, t in enumerate(types) if t == "pickup_deliver"]
         if P:
-            plans = {i: plan(obs, i)[1] for i in P}
-            goal = min(P, key=lambda i: (len(plans[i]), i))   # ties -> lowest node id
+            if rule == "shortest":
+                C = P
+            elif rule == "best3":
+                C = sorted(rng.choice(P, size=min(3, len(P)), replace=False).tolist())
+            else:
+                C = [int(rng.choice(P))]
+            plans = {i: plan(obs, i)[1] for i in C}
+            goal = min(C, key=lambda i: (len(plans[i]), i))   # ties -> lowest node id
             acts = plans[goal]
         else:
             goal = env.sim.taxi.location                      # no-op: 1 frame
@@ -213,7 +233,7 @@ def shortest_episode(seed):
 def shortest():
     import sage
     print(f"sage from {os.path.dirname(sage.__file__)}")
-    res = [shortest_episode(100 + k) for k in range(10)]
+    res = [reference_episode(100 + k, "shortest") for k in range(10)]
     json.dump(res, open(os.path.join(OUT, "3_shortest_plan.json"), "w"))
     greedy = json.load(open(os.path.join(HERE, "results", "step4", "greedy_head.json")))
     gd = {r["seed"]: r["delivered"] for r in greedy}
@@ -246,9 +266,42 @@ def seeds(models):
     print(txt)
 
 
+def references():
+    """5. best-of-3-random-passengers and random-passenger policies, next to the other policies."""
+    import sage
+    print(f"sage from {os.path.dirname(sage.__file__)}")
+    for rule, fname in (("best3", "5_best_of_3.json"), ("random", "5_random_passenger.json")):
+        res = [reference_episode(100 + k, rule) for k in range(10)]
+        json.dump(res, open(os.path.join(OUT, fname), "w"))
+        print(rule, [r["delivered"] for r in res])
+
+
+def clamp(model, zip_path, tree_snapshot):
+    """Actor clamp statistics for one model on the 495 states (its own simulator view)."""
+    from analysis.models import load_policy, actor_logits_probs
+    gt = json.load(open(os.path.join(SC, "gt.json")))
+    obs = json.load(open(os.path.join(SC, f"snapshot_{tree_snapshot}.json")))["obs"]
+    pol, _, _ = load_policy(zip_path)
+    above, short, uni, const, nonp = [], [], [], 0, []
+    for sid, g in gt.items():
+        P = [i for i, t in enumerate(g["types"]) if t == "pickup_deliver"]
+        L = np.array(g["plan_len"])
+        S = [i for i in P if L[i] == L[P].min()]
+        lg, pr = actor_logits_probs(pol, obs[sid])
+        above.append(np.mean(lg[P] >= 30)); short.append(pr[S].sum()); uni.append(len(S) / len(P))
+        const += np.ptp(pr[P]) < 1e-12
+        nonp.append(np.delete(lg, P).max())
+    txt = (f"{NAMES.get(model, model)}: passenger logits >= 30: {100 * np.mean(above):.1f}% | identical prob across all "
+           f"passengers in {const}/{len(gt)} states | prob on shortest passenger {100 * np.mean(short):.1f}% (uniform "
+           f"share {100 * np.mean(uni):.1f}%) | max non-passenger logit median {np.median(nonp):.1f}")
+    open(os.path.join(OUT, f"clamp_{model}.txt"), "w").write(txt)
+    print(txt)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["attribution", "bootstrap", "shortest", "seeds"])
+    ap.add_argument("mode", choices=["attribution", "bootstrap", "shortest", "seeds", "references", "clamp"])
+    ap.add_argument("--model"); ap.add_argument("--zip"); ap.add_argument("--snapshot", default="head")
     a = ap.parse_args()
     os.makedirs(OUT, exist_ok=True)
     if a.mode == "attribution":
@@ -257,8 +310,12 @@ def main():
         bootstrap()
     elif a.mode == "shortest":
         shortest()
+    elif a.mode == "references":
+        references()
+    elif a.mode == "clamp":
+        clamp(a.model, a.zip, a.snapshot)
     else:
-        seeds(["cell1", "cell1_s300", "cell3", "cell3_s300"])
+        seeds(["cell1", "cell1_s300", "cell1fixed", "cell3", "cell3_s300"])
 
 
 if __name__ == "__main__":
