@@ -349,6 +349,12 @@ Greedy policy (`eps=0`) + planner projections, 8 full episodes, `sample_every=20
 seed 700001 (disjoint from both the build and the OOV held-out seeds), `k=15`
 candidates/state:
 
+> Note (added on `cell4-vilg-L1`): this table was produced by an uncommitted script whose
+> candidate RNG wiring was not recorded, so its exact counts cannot be reproduced. The same
+> measurement is now committed as `sage/domains/utils/wl_collision_depth.py`; with these
+> settings it gives 0.12 / 0.03 / 0.03 / 0.04% for this vocab (same magnitudes). See
+> `docs/cell4_L1.md` for that tool's tables across all WL vocabs.
+
 | bucket | states | pairs | collisions | collision% |
 |---|---:|---:|---:|---:|
 | 0-60 | 24 | 2,478 | 4 | 0.1614% |
