@@ -189,15 +189,30 @@ class TestRealGraphs(_Base):
 
 class TestEdgeCases(_Base):
     def test_empty_graph(self):
+        """Version-independent: torch 1.7.1 (RCP) raises inside initial_colours' th.argmax
+        on an empty tensor, newer torch returns an empty result. Either way the new code
+        must behave exactly like the reference: both raise the same exception type, or
+        both return identical results. (Real Taxi graphs are never empty.)"""
         x = th.zeros((0, 3))
         ei = th.zeros((2, 0), dtype=th.long)
         ea = th.zeros((0, 4))
+
+        def outcome(fn, vocab, frozen):
+            try:
+                return "ok", fn(x, ei, ea, num_iterations=2, vocab=dict(vocab), frozen=frozen)
+            except Exception as exc:  # noqa: BLE001 - the exception type is what is compared
+                return "raised", type(exc)
+
         for frozen in (False, True):
-            vocab = {W.OOV_SIGNATURE: 0} if frozen else {}
-            self.assert_same(
-                W.wl_colours(x, ei, ea, num_iterations=2, vocab=dict(vocab), frozen=frozen),
-                reference_wl_colours(x, ei, ea, num_iterations=2, vocab=dict(vocab), frozen=frozen),
-            )
+            with self.subTest(frozen=frozen):
+                vocab = {W.OOV_SIGNATURE: 0} if frozen else {}
+                new_kind, new = outcome(W.wl_colours, vocab, frozen)
+                ref_kind, ref = outcome(reference_wl_colours, vocab, frozen)
+                self.assertEqual(new_kind, ref_kind)
+                if new_kind == "raised":
+                    self.assertIs(new, ref)
+                else:
+                    self.assert_same(new, ref)
 
     def test_isolated_nodes_and_oov(self):
         # oracle_sage layout: 3 nodes, one road edge pair, node 2 isolated
