@@ -287,23 +287,28 @@ def refine(
     """
     _check_frozen_vocab(vocab, frozen, "refine")
 
-    n = node_colours.shape[0]
-    src = edge_index[0].tolist()
-    dst = edge_index[1].tolist()
-    node_colours_list = node_colours.tolist()
-    edge_labels_list = edge_labels.tolist()
+    new_colours = _refine_list(
+        node_colours.tolist(), edge_index[0].tolist(), edge_index[1].tolist(), edge_labels.tolist(), vocab, frozen
+    )
+    return th.tensor(new_colours, dtype=th.long, device=node_colours.device)
 
-    neighbours = [[] for _ in range(n)]
+
+def _refine_list(node_colours_list, src, dst, edge_labels_list, vocab, frozen):
+    """
+    `refine` on plain Python lists: returns the new colour ids as a list. Signatures are
+    resolved in node order (v = 0..N-1), so in growing mode new ids are assigned in exactly
+    the order `refine` has always assigned them. Kept list-based (one tensor built by the
+    caller at the end, instead of one tensor write per node) purely for speed - per-node
+    tensor writes dominated wl_colours' run time.
+    """
+    neighbours = [[] for _ in range(len(node_colours_list))]
     for e, s in enumerate(src):
-        d = dst[e]
-        neighbours[s].append((node_colours_list[d], edge_labels_list[e]))
+        neighbours[s].append((node_colours_list[dst[e]], edge_labels_list[e]))
 
-    new_colours = th.empty(n, dtype=th.long, device=node_colours.device)
-    for v in range(n):
-        signature = (node_colours_list[v], tuple(sorted(neighbours[v])))
-        new_colours[v] = _resolve(signature, vocab, frozen)
-
-    return new_colours
+    return [
+        _resolve((own, tuple(sorted(nbrs))), vocab, frozen)
+        for own, nbrs in zip(node_colours_list, neighbours)
+    ]
 
 
 def wl_colours(
@@ -394,10 +399,9 @@ def wl_colours(
         type_colours = initial_colours_atom(x).tolist()
     else:
         type_colours = initial_colours(x).tolist()
-    colours = th.empty(x.shape[0], dtype=th.long, device=x.device)
-    for v, type_id in enumerate(type_colours):
-        signature = ("init", type_id)
-        colours[v] = _resolve(signature, vocab, frozen)
+    # Colours are kept as a Python list across iterations and turned into a tensor once at
+    # the end (see _refine_list); resolution order, and so every id, is unchanged.
+    colours = [_resolve(("init", type_id), vocab, frozen) for type_id in type_colours]
 
     if graph_convention == "vilg":
         labels = edge_labels_vilg(edge_attr)
@@ -405,8 +409,10 @@ def wl_colours(
         labels = edge_labels_atom(edge_attr)
     else:
         labels = edge_labels(edge_attr)
+    src, dst, labels = edge_index[0].tolist(), edge_index[1].tolist(), labels.tolist()
     for _ in range(num_iterations):
-        colours = refine(colours, edge_index, labels, vocab, frozen=frozen)
+        colours = _refine_list(colours, src, dst, labels, vocab, frozen)
+    colours = th.tensor(colours, dtype=th.long, device=x.device)
 
     # bincount, not a Python loop: colours is always th.long with every value
     # in [0, len(vocab)) (see _resolve - its only two return paths are
