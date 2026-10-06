@@ -60,6 +60,7 @@
    actually produced the file on disk.
 """
 import json
+import warnings
 from functools import lru_cache
 from pathlib import Path
 
@@ -193,6 +194,8 @@ def validate_wl_vocab_metadata(metadata, expected_graph_convention, expected_num
       save_vocab, so a metadata-less vocab can only mean "this vocab predates atom
       entirely (or was never meant for it)" - never a legitimate atom vocab that merely
       predates the metadata feature, unlike oracle_sage/vilg's existing vocab files.
+      For expected_graph_convention == "vilg" it is accepted (Cell 4's L=2 vocab predates
+      metadata) but warns, since neither the convention nor L can be verified.
     - metadata is present: graph_convention is checked only if
       expected_graph_convention is not None (so oracle_sage/vilg callers that have
       never passed one - see configure_wl_vocab_override's own docstring - still skip
@@ -213,6 +216,15 @@ def validate_wl_vocab_metadata(metadata, expected_graph_convention, expected_num
                 f"{source}: vocab has no recorded graph_convention/num_iterations "
                 f"metadata, but graph_convention='atom' requires it - old vocab files "
                 f"predate the atom convention and cannot be trusted for it."
+            )
+        if expected_graph_convention == "vilg":
+            warnings.warn(
+                f"{source}: vocab has no recorded graph_convention/num_iterations metadata - "
+                f"accepted for graph_convention='vilg', but its convention and L CANNOT be "
+                f"verified (this run expects L={expected_num_iterations}). Rebuild it with "
+                f"build_wl_vocab.py to record metadata.",
+                UserWarning,
+                stacklevel=3,
             )
         return
 

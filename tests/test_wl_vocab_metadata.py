@@ -18,6 +18,7 @@ import json
 import tempfile
 import os
 import unittest
+import warnings
 
 from sage.domains.gym_taxi.utils.wl_vocab_cache import (
     configure_wl_vocab_override,
@@ -200,6 +201,76 @@ class TestLoadVocabGuards(TempVocabDir):
         from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH
         vocab = _load_vocab(str(WL_VOCAB_PATH))
         self.assertGreater(len(vocab), 0)
+
+
+class _VilgGuardCases:
+    """vilg rules, run against each loader (see the two subclasses below): vocabs WITH
+    metadata are fully enforced (convention and L); metadata-less vocabs are accepted
+    with a warning that L cannot be verified."""
+
+    def load(self, path, num_iterations, graph_convention="vilg"):
+        raise NotImplementedError
+
+    def test_vilg_matching_metadata_loads_without_warning(self):
+        p = self.path("v.json")
+        write_vocab(p, graph_convention="vilg", num_iterations=1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.load(p, 1)
+        self.assertEqual([str(w.message) for w in caught], [])
+
+    def test_vilg_wrong_recorded_convention_raises(self):
+        for other in ("atom", "oracle_sage"):
+            with self.subTest(recorded=other):
+                p = self.path(f"v_{other}.json")
+                write_vocab(p, graph_convention=other, num_iterations=1)
+                with self.assertRaises(ValueError):
+                    self.load(p, 1)
+
+    def test_vilg_wrong_num_iterations_raises(self):
+        p = self.path("v.json")
+        write_vocab(p, graph_convention="vilg", num_iterations=2)
+        with self.assertRaises(ValueError):
+            self.load(p, 1)
+
+    def test_vilg_metadata_less_vocab_accepted_with_warning(self):
+        p = self.path("v.json")
+        write_vocab(p)
+        with self.assertWarnsRegex(UserWarning, "L CANNOT be verified"):
+            self.load(p, 1)
+
+    def test_real_cell4_vocab_accepted_with_warning(self):
+        """Cell 4's shipped L=2 vilg vocab predates metadata."""
+        from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH
+        p = str(WL_VOCAB_PATH.parent / "wl_vocab_taxi_city_vilg_L2.json")
+        with self.assertWarnsRegex(UserWarning, "expects L=2"):
+            self.load(p, 2)
+
+    def test_oracle_sage_metadata_less_vocab_does_not_warn(self):
+        p = self.path("v.json")
+        write_vocab(p)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.load(p, 1, graph_convention="oracle_sage")
+        self.assertEqual(caught, [])
+
+
+class TestConfigureWlVocabOverrideVilg(_VilgGuardCases, TempVocabDir):
+    def load(self, path, num_iterations, graph_convention="vilg"):
+        configure_wl_vocab_override(path, num_iterations, graph_convention=graph_convention)
+        self.assertTrue(is_wl_override_configured())
+
+    def test_rejected_override_never_takes_effect(self):
+        p = self.path("v.json")
+        write_vocab(p, graph_convention="vilg", num_iterations=2)
+        with self.assertRaises(ValueError):
+            configure_wl_vocab_override(p, 1, graph_convention="vilg")
+        self.assertFalse(is_wl_override_configured())
+
+
+class TestLoadVocabVilg(_VilgGuardCases, TempVocabDir):
+    def load(self, path, num_iterations, graph_convention="vilg"):
+        return _load_vocab(path, graph_convention=graph_convention, num_iterations=num_iterations)
 
 
 if __name__ == "__main__":
