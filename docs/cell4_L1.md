@@ -313,7 +313,22 @@ timesteps.
 
 ## Test suite
 
-`python -m pytest tests docs --ignore=docs/test_vilg.py`: 192 passed, 5 skipped (Mac,
-gym 0.26 / torch 2.13 / PyG 2.8). `docs/test_vilg.py` is a module-level script that
-unpacks a 5-tuple from `env_to_graph`; it has failed at collection since WL was added to
-`env_to_graph` (it already fails at `46260c9`) and is unrelated to this work.
+- **On RCP** (torch 1.7.1, gym 0.18): run `python -m pytest tests`, not `docs/`. The
+  `docs/` scripts `test_cli_graph_convention.py` and `test_vilg.py` date from the Mac
+  stack and fail on gym 0.18.
+- **On the Mac** (gym 0.26 / torch 2.13 / PyG 2.8):
+  `python -m pytest tests docs --ignore=docs/test_vilg.py` gave 192 passed, 5 skipped.
+  `docs/test_vilg.py` is a module-level script that unpacks a 5-tuple from
+  `env_to_graph`. It has failed at collection since WL was added to `env_to_graph` (it
+  already fails at `46260c9`) and is unrelated to this work.
+
+**Torch-version difference (empty graphs).** `initial_colours`' `th.argmax` behaves
+differently on an empty node tensor:
+- torch 1.7.1 raises `RuntimeError` ("cannot perform reduction function argmax on a
+  tensor with no elements");
+- newer torch returns an empty tensor.
+
+This is unchanged by `96395b6`, and real Taxi graphs are never empty, so production code
+is left as is. `tests/test_wl_colours_list_refine.py::TestEdgeCases::test_empty_graph`
+therefore checks only that the new `wl_colours` and the reference implementation behave
+the same way: both raise the same exception type, or both return identical results.
