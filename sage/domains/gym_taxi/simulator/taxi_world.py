@@ -102,10 +102,13 @@ class TaxiWorldSimulator(object):
             return env_to_atom_json(self)
         return env_to_json(self)
 
-    def act(self, action):
+    def act(self, action, build_obs=True):
         """
         Advances the game state by one step
         :param action: action provided by the agent
+        :param build_obs: if False, the observation JSON is not built and None is returned
+            in its place (see GraphTaxiEnv.skip_next_observation). Building it has no side
+            effects on the simulator state, so skipping it never changes the trajectory.
         :returns: observation of the next state
         :raises assertionError: raises an exception if action is invalid
         """
@@ -125,7 +128,8 @@ class TaxiWorldSimulator(object):
         if self.delivery_limit == 0:
             self.done = True
         self.time += 1
-        return self._get_state_json(), reward, self.done, {}
+        obs = self._get_state_json() if build_obs else None
+        return obs, reward, self.done, {}
 
     def attempt_dropoff(self,action):
         pid = self.taxi.passenger

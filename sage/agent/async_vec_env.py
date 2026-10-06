@@ -35,25 +35,39 @@ class AsyncVecEnv(DummyVecEnv):
         self.buf_infos = [{} for _ in range(self.num_envs)]
         self.actions = None
         self.mask = None
+        self.obs_mask = None
         self.metadata = env.metadata
 
-    def step(self, actions: np.ndarray, mask: np.ndarray) -> VecEnvStepReturn:
+    def step(self, actions: np.ndarray, mask: np.ndarray, obs_mask: Optional[np.ndarray] = None) -> VecEnvStepReturn:
         """
         Step the environments with the given action
 
         :param actions: the action
+        :param mask: which environments to step
+        :param obs_mask: which stepped environments need this step's observation. None (the
+            default) means all of them. Where it is False, the env is asked to skip building
+            the observation (GraphTaxiEnv.skip_next_observation; envs without that method,
+            or that decline it, build it as usual) and the env's slot in the observation
+            buffer is left unchanged - so the caller must step that env again before reading
+            its observation, unless the step ends the episode (the reset observation is then
+            saved as usual).
         :return: observation, reward, done, information
         """
-        self.step_async(actions, mask)
+        self.step_async(actions, mask, obs_mask)
         return self.step_wait()
 
-    def step_async(self, actions: np.ndarray, mask: np.ndarray) -> None:
+    def step_async(self, actions: np.ndarray, mask: np.ndarray, obs_mask: Optional[np.ndarray] = None) -> None:
         self.actions = actions
         self.mask = mask
+        self.obs_mask = obs_mask
 
     def step_wait(self) -> VecEnvStepReturn:
         for env_idx in range(self.num_envs):
             if self.mask[env_idx]:
+                if self.obs_mask is not None and not self.obs_mask[env_idx]:
+                    skip_next_observation = getattr(self.envs[env_idx].unwrapped, "skip_next_observation", None)
+                    if skip_next_observation is not None:
+                        skip_next_observation()
                 obs, self.buf_rews[env_idx], self.buf_dones[env_idx], self.buf_infos[env_idx] = self.envs[env_idx].step(
                     self.actions[env_idx]
                 )
@@ -61,5 +75,6 @@ class AsyncVecEnv(DummyVecEnv):
                     # save final observation where user can get it, then reset
                     self.buf_infos[env_idx]["terminal_observation"] = obs
                     obs = self.envs[env_idx].reset()
-                self._save_obs(env_idx, obs)
+                if obs is not None:  # None only for a skipped, non-terminal observation
+                    self._save_obs(env_idx, obs)
         return (self._obs_from_buf(), np.copy(self.buf_rews), np.copy(self.buf_dones), deepcopy(self.buf_infos))

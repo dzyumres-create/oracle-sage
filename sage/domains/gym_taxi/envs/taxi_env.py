@@ -194,10 +194,15 @@ class BaseTaxiEnv(gym.Env):
     def _init_simulator(self):  
         return TaxiWorldSimulator(self.np_random, 5)
 
-    def _step(self, action):
+    def _step(self, action, build_obs=True):
         self.steps += 1
         self.lastaction = action
-        obs, reward, done, info = self.sim.act(action)
+        # build_obs=False is only ever passed by GraphTaxiEnv (TaxiWorldSimulator); every
+        # other caller keeps the original sim.act(action) call unchanged.
+        if build_obs:
+            obs, reward, done, info = self.sim.act(action)
+        else:
+            obs, reward, done, info = self.sim.act(action, build_obs=False)
         self.score += reward
         info["score"] = self.score
         if done:
@@ -591,6 +596,7 @@ class GraphTaxiEnv(BaseTaxiEnv):
         self.first = True
         if scenario == "original":
             self.action_space = spaces.Discrete(ORIGINAL_ACTION_COUNT)
+        self._skip_next_obs = False
 
     def _init_simulator(self):
         return TaxiWorldSimulator(
@@ -600,6 +606,25 @@ class GraphTaxiEnv(BaseTaxiEnv):
             planning= not self.mask,
             graph_convention=self.graph_convention,
         )
+
+    def skip_next_observation(self):
+        """
+        One-shot request (from AsyncVecEnv, on behalf of PlanFeedback_A2C.collect_rollouts)
+        to not build the observation JSON on the next step(), because nothing will read it:
+        an intermediate plan step's observation is overwritten in the vec env's buffer by
+        the same env's next plan step before collect_rollouts reads the buffer.
+
+        Only honoured for graph_convention="vilg" (returns True); oracle_sage and atom
+        ignore it (return False) and keep building every observation exactly as before.
+        If the skipped step ends the episode, step() builds the observation anyway, so
+        terminal_observation is always the real JSON string.
+
+        :return: True if the next step() will skip building its observation
+        """
+        if self.graph_convention != "vilg":
+            return False
+        self._skip_next_obs = True
+        return True
 
     def _check_json_length(self, obs):
         """
@@ -620,13 +645,23 @@ class GraphTaxiEnv(BaseTaxiEnv):
             )
 
     def step(self, action):
-        obs, reward, done, info = self._step(action)
-        self._check_json_length(obs)
+        if self._skip_next_obs:
+            self._skip_next_obs = False
+            obs, reward, done, info = self._step(action, build_obs=False)
+            if done:
+                # the episode ended mid-plan: this observation becomes terminal_observation,
+                # so build it now (the simulator state is unchanged since act()).
+                obs = self.sim._get_state_json()
+        else:
+            obs, reward, done, info = self._step(action)
+        if obs is not None:
+            self._check_json_length(obs)
         info['s_true'] = obs
         info['d_true'] = done
         return obs, reward, done, info
 
     def reset(self):
+        self._skip_next_obs = False
         obs = super().reset()
         self._check_json_length(obs)
         return obs

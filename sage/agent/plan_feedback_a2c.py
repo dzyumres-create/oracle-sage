@@ -30,6 +30,23 @@ from sage.agent.epsilon_buffer import EpsilonRolloutBuffer
 from sage.agent.feedback_a2c import Feedback_A2C
 
 
+def observation_needed(plan_step, plan_lengths):
+    """
+    Per-env obs_mask for AsyncVecEnv.step at `plan_step` of collect_rollouts' plan loop:
+    True exactly where this step is that env's last plan step, i.e. the step whose
+    observation the env's next decision reads (new_obs after the loop is each env's last
+    saved buffer entry, and an env is never stepped again once its plan is exhausted).
+    Every earlier step's observation is overwritten in the buffer by the same env's next
+    step. A done on an earlier step needs no special case: the env stops there, and the
+    reset observation saved at that step is always built (see AsyncVecEnv.step_wait).
+
+    :param plan_step: current column of the plan grid
+    :param plan_lengths: plan length per env
+    :return: bool array, one entry per env
+    """
+    return plan_step == np.asarray(plan_lengths) - 1
+
+
 class PlanFeedback_A2C(Feedback_A2C):
     """
     Feedback Advantage Actor Critic (A2C)
@@ -88,7 +105,7 @@ class PlanFeedback_A2C(Feedback_A2C):
                 env_actions = plans_grid[:,plan_step]
                 env_finished = np.logical_or(env_finished,(env_actions == -1)) #if any plans have invalid actions, they are finished
                 self.env_steps+=np.logical_not(env_finished).sum()
-                new_obs, rewards, dones, infos = env.step(env_actions,np.logical_not(env_finished))
+                new_obs, rewards, dones, infos = env.step(env_actions,np.logical_not(env_finished),observation_needed(plan_step,plan_lengths))
                 plan_rewards += ((math.pow(self.gamma,plan_step))*rewards)*(1-env_finished) #aggregate reward for all continuing environments
                 env_finished = np.logical_or(env_finished,dones)
                 plan_step +=1
