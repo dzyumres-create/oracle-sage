@@ -52,6 +52,7 @@ from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_
 from sage.forks.stable_baselines3.stable_baselines3.common.logger import HumanOutputFormat
 
 from analysis.old_domain_info_hash import old_domain_info_hashes
+from tests.test_ternary_wiring import OLD_DOMAIN_REFERENCE_COMMAND
 
 CONVENTIONS = ("oracle_sage", "vilg", "atom")
 TERNARY_ENV_ID = "city-taxi-ternary-unmasked-v1"
@@ -488,25 +489,21 @@ class TestLoggedKeysSurviveTruncation(unittest.TestCase):
 # Computed with analysis/old_domain_info_hash.py; keyed by stack like
 # test_ternary_wiring.OLD_DOMAIN_REFERENCE_SHA256 (env.seed differs by gym version).
 # Each entry is (monitor_sha256, info_sha256).
-#   gym0.26: Mac (gym 0.26.2); identical at 82c885f (before Task A) and with Task A applied.
-#   gym0.18: RCP (gym 0.18.0); identical at the pre-ternary commit a628f16 and with
-#            Task A applied, for every convention.
+# Re-baselined on ternary-wl against commit ebbf25b, the code the standard-Taxi L=1 WL
+# baselines ran on: there each step's info carries s_true, the observation JSON, whose
+# oracle_sage/vilg form includes WL fields, so the cell5-based values no longer apply
+# (Monitor CSVs and atom's info hash are unchanged). A stack with no entry FAILS (never
+# skips), with the command that generates it.
+#   gym0.26: Mac (gym 0.26.2), analysis/old_domain_info_hash.py run against ebbf25b.
+#   gym0.18: not yet recorded -- run OLD_DOMAIN_REFERENCE_COMMAND on RCP.
 OLD_DOMAIN_INFO_REFERENCE_SHA256 = {
     "gym0.26": {
         "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                        "37361c611b3f02d92f87049368fb3c50030c4bf3924626219beb5817a8a8ecf0"),
+                        "f64be900fbbd1804374ea37bfd5f797c97ebc8c0201aa71363e29f8fe516470a"),
         "vilg": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                 "c60554f0cf090cad9b9f484631c39a8e53c3c8ef666eb076f4f28a82950a1a9c"),
+                 "893b65912a17a094026c387c75d942ad3598a43fb156125d1a17d27e1403fcc7"),
         "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
                  "2b27206df4a5a0985c185fd82e709ccdd5e1f2cbf2592d093823329941d5c570"),
-    },
-    "gym0.18": {
-        "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                        "56e7b5932943bd524ab83d39cfc9e498d2d19174b6b394c80183e07fa7c6f27a"),
-        "vilg": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                 "f1b23181a080adcad02c597291234b467fb3ac55b4f968757cc0749a125c5e6f"),
-        "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                 "121d53778c32495842f6dd3f198fc6615405e03486b429b6456649b849efae1c"),
     },
 }
 
@@ -521,11 +518,12 @@ class TestOldDomainInfoUnchanged(unittest.TestCase):
         references = OLD_DOMAIN_INFO_REFERENCE_SHA256.get(stack, {})
         missing = [c for c in CONVENTIONS if c not in references]
         if missing:
-            self.skipTest(
+            self.fail(
                 f"no old-domain info/Monitor reference for stack {stack!r} (gym {gym_module.__version__}), "
-                f"conventions {missing}: compute them with "
-                f"`PYTHONPATH=. python analysis/old_domain_info_hash.py <convention>` at commit 82c885f "
-                f"on this stack and add them to OLD_DOMAIN_INFO_REFERENCE_SHA256[{stack!r}]"
+                f"conventions {missing}. Generate them at ebbf25b on this stack with:\n"
+                f"    {OLD_DOMAIN_REFERENCE_COMMAND}\n"
+                f"and add the old_domain_info_hash.py (monitor, info) pairs to "
+                f"OLD_DOMAIN_INFO_REFERENCE_SHA256[{stack!r}] in tests/test_ternary_diagnostic.py"
             )
         # gnn_global.py's own choice for the old env -- the header the reference was
         # recorded with ("len100", "len200") must still be what it passes.

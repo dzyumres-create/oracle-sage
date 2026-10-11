@@ -448,24 +448,35 @@ class TestPlannerNowWired(unittest.TestCase):
 #     one: env.seed() gives a numpy Generator under gym 0.26 but a RandomState under
 #     gym 0.18, so the same seed yields different mazes and passengers. Compute an entry
 #     with analysis/old_domain_obs_hash.py (same seed, actions and hashing as this test),
-#     run against the pre-ternary commit a628f16 on the stack in question.
+#     run against commit ebbf25b on the stack in question.
 #
-#     gym0.26: recorded on the Mac from a628f16 via `git stash` / `git stash pop` around a
-#              standalone capture script, before the wiring commit's edits.
-#     gym0.18: computed on RCP (gym 0.18.0) with analysis/old_domain_obs_hash.py;
-#              identical at a628f16 and 82c885f for every convention.
+#     Re-baselined on ternary-wl: the reference commit is ebbf25b, the code the
+#     standard-Taxi L=1 WL baselines ran on (its oracle_sage/vilg observations carry WL
+#     fields, so the cell5-based a628f16 values no longer apply there; atom's value is
+#     unchanged). A stack with no entry FAILS (never skips) with the command to run.
+#
+#     gym0.26: Mac (gym 0.26.2), analysis/old_domain_obs_hash.py run against ebbf25b.
+#     gym0.18: not yet recorded -- run OLD_DOMAIN_REFERENCE_COMMAND on RCP.
 # ==========================================================================================
+
+# Exact command that prints the missing values, from the repo root of any checkout that has
+# the ternary-wl branch: the two scripts come from ternary-wl, the code under test from a
+# throwaway worktree at ebbf25b.
+OLD_DOMAIN_REFERENCE_COMMAND = (
+    "git worktree add --detach /tmp/ref-ebbf25b ebbf25b && mkdir -p /tmp/ref-scripts && "
+    "git show ternary-wl:analysis/old_domain_obs_hash.py > /tmp/ref-scripts/old_domain_obs_hash.py && "
+    "git show ternary-wl:analysis/old_domain_info_hash.py > /tmp/ref-scripts/old_domain_info_hash.py && "
+    "(cd /tmp/ref-ebbf25b && for c in oracle_sage vilg atom; do "
+    "PYTHONPATH=. python /tmp/ref-scripts/old_domain_obs_hash.py $c; "
+    "PYTHONPATH=. python /tmp/ref-scripts/old_domain_info_hash.py $c; done) && "
+    "git worktree remove --force /tmp/ref-ebbf25b"
+)
 
 OLD_DOMAIN_REFERENCE_SHA256 = {
     "gym0.26": {
-        "oracle_sage": "984aee8dc43d9e24c03a0f2a6d044ed407aa1968b0068b4a15ea269e53d20113",
-        "vilg": "90617bddec63dfb707212be3d428281c21f8db55b81914d4dc62cf167f8b0d9e",
+        "oracle_sage": "a1f954d3b08ac6d2fab00727578baa1a33c974b7d28e3b19cdc869e9d85df773",
+        "vilg": "6d13a91ad902e72d872e8c182e836d9d4c52d0d79e08377608eab605ed781e4a",
         "atom": "443aba261710f3dc090cd55617c1f0f019a4ec4a3ce3d04dc3cf5f358e346ecc",
-    },
-    "gym0.18": {
-        "oracle_sage": "0cf66d8854185d465e5da63eb16187cf77d61dcb749d5032ac67814c462c05b9",
-        "vilg": "327957eae8e6674af8b54e88933101a04035a95f189351c3697310de9d57a736",
-        "atom": "59ba07766f6bf0538f5952724e6d0ddcb5ed81849c9c8f95d4c900aad96be504",
     },
 }
 
@@ -499,11 +510,12 @@ class TestOldDomainUnchanged(unittest.TestCase):
         references = OLD_DOMAIN_REFERENCE_SHA256.get(stack, {})
         missing = [c for c in CONVENTIONS if c not in references]
         if missing:
-            self.skipTest(
+            self.fail(
                 f"no old-domain reference hash for stack {stack!r} (gym {gym_module.__version__}), "
-                f"conventions {missing}: compute them with "
-                f"`PYTHONPATH=. python analysis/old_domain_obs_hash.py <convention>` at commit a628f16 "
-                f"on this stack and add them to OLD_DOMAIN_REFERENCE_SHA256[{stack!r}]"
+                f"conventions {missing}. Generate them at ebbf25b on this stack with:\n"
+                f"    {OLD_DOMAIN_REFERENCE_COMMAND}\n"
+                f"and add the old_domain_obs_hash.py lines to OLD_DOMAIN_REFERENCE_SHA256[{stack!r}] "
+                f"in tests/test_ternary_wiring.py"
             )
 
         for convention in CONVENTIONS:
@@ -521,7 +533,7 @@ class TestOldDomainUnchanged(unittest.TestCase):
             actual_hash = hashlib.sha256(blob.encode()).hexdigest()
             self.assertEqual(
                 actual_hash, references[convention],
-                f"{convention}: old-domain observations changed vs the a628f16 reference for stack {stack!r}",
+                f"{convention}: old-domain observations changed vs the ebbf25b reference for stack {stack!r}",
             )
             env.close()
 
