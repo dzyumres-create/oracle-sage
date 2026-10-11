@@ -111,9 +111,15 @@ class TestTrainingUnchanged(unittest.TestCase):
 
 
 class TestLoggedValues(unittest.TestCase):
-    """From one snapshotted update: grad_norm_total is exactly what clip_grad_norm_
-    computes, head and train partition it (path_value_net is the only policy parameter
-    outside the optimizer), and clip_coef is torch's own factor."""
+    """From one snapshotted update, each logged norm equals a direct clip_grad_norm_
+    computation (max_norm=inf, so it only measures) over the parameter set it describes,
+    taken from the model's ACTUAL optimizer param groups at the moment of clipping:
+    grad_norm_train over the optimizer's parameters, grad_norm_head over path_value_net's,
+    grad_norm_total over all policy parameters (what the real clip computes). Whether
+    path_value_net is in the optimizer differs by branch (it is on the WL branches, which
+    have the optimizer-timing fix, and is not on the GNN branches), so nothing here
+    assumes either: the partition total**2 = train**2 + outside**2 uses the parameters
+    actually outside the optimizer, whatever they are."""
 
     @classmethod
     def setUpClass(cls):
@@ -125,16 +131,33 @@ class TestLoggedValues(unittest.TestCase):
 
     def test_values_match_clip_grad_norm(self):
         model = self.model
-        outside = [n for n, p in model.policy.named_parameters()
-                   if id(p) not in {id(q) for g in model.policy.optimizer.param_groups for q in g["params"]}]
-        self.assertEqual(sorted(outside), ["path_value_net.path_value_net.bias", "path_value_net.path_value_net.weight"])
+        policy = model.policy
+        in_optimizer = {id(q) for g in policy.optimizer.param_groups for q in g["params"]}
+        head_ids = {id(p) for p in policy.path_value_net.parameters()}
+        outside_names = sorted(n for n, p in policy.named_parameters() if id(p) not in in_optimizer)
+        print(f"\n[optimizer membership] path_value_net in optimizer: {head_ids <= in_optimizer}; "
+              f"policy parameters outside the optimizer: {outside_names}")
 
         real_clip = th.nn.utils.clip_grad_norm_
+
+        def measured_norm(params):
+            """clip_grad_norm_ with max_norm=inf only measures (its scale factor is never
+            below 1), so it changes no gradient; an empty set has norm 0."""
+            params = [p for p in params if p.grad is not None]
+            return float(real_clip(params, float("inf"))) if params else 0.0
+
         for n in (1, 2):
             with self.subTest(update_chunks=n):
-                clip_totals = []
+                clip_totals, expected = [], []
 
                 def clip_spy(params, max_norm, *args, **kwargs):
+                    # ground truth, from the gradients as they are when clipping starts
+                    expected.append({
+                        "train": measured_norm(q for g in policy.optimizer.param_groups for q in g["params"]),
+                        "head": measured_norm(policy.path_value_net.parameters()),
+                        "total": measured_norm(policy.parameters()),
+                        "outside": measured_norm(p for p in policy.parameters() if id(p) not in in_optimizer),
+                    })
                     total = real_clip(params, max_norm, *args, **kwargs)
                     clip_totals.append(float(total))
                     return total
@@ -148,8 +171,13 @@ class TestLoggedValues(unittest.TestCase):
                 head, trained, total, coef = (logged[k] for k in GRAD_NORM_KEYS)
                 print(f"\n[grad norms, N={n}] head {head:.4f}  train {trained:.4f}  total {total:.4f}  clip_coef {coef:.4f}")
                 self.assertEqual(len(clip_totals), 1)
-                self.assertAlmostEqual(total, clip_totals[0], delta=1e-6 * max(total, 1.0))
-                self.assertAlmostEqual(total ** 2, head ** 2 + trained ** 2, delta=1e-5 * max(total ** 2, 1.0))
+                truth = expected[0]
+                tol = 1e-6 * max(truth["total"], 1.0)
+                self.assertAlmostEqual(total, clip_totals[0], delta=tol)
+                self.assertAlmostEqual(total, truth["total"], delta=tol)
+                self.assertAlmostEqual(trained, truth["train"], delta=tol)
+                self.assertAlmostEqual(head, truth["head"], delta=tol)
+                self.assertAlmostEqual(total ** 2, trained ** 2 + truth["outside"] ** 2, delta=1e-5 * max(total ** 2, 1.0))
                 self.assertAlmostEqual(coef, min(1.0, model.max_grad_norm / (clip_totals[0] + 1e-6)), delta=1e-7)
 
 

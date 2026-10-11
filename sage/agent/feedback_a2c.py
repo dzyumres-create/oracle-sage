@@ -236,12 +236,19 @@ class Feedback_A2C(A2C):
         clip_grad_norm_, read after backward and before clipping. Reads .grad, changes
         nothing.
 
-        path_value_net is not in the optimizer (it is created after it), so
-        optimizer.zero_grad() never clears its .grad: it accumulates across updates, yet
-        clip_grad_norm_(self.policy.parameters(), ...) still counts it in the global norm.
-          train/grad_norm_head   norm of path_value_net's (accumulated) gradient
-          train/grad_norm_train  norm over the parameters the optimizer updates
-          train/grad_norm_total  the global norm clip_grad_norm_ computes
+        Whether path_value_net is in the optimizer depends on the branch. Where it is built
+        after the optimizer (the GNN branches, e.g. ternary-gnn and Cells 1, 2, 5), it is
+        not in it: optimizer.zero_grad() never clears its .grad, which accumulates across
+        updates, yet clip_grad_norm_(self.policy.parameters(), ...) still counts it in the
+        global norm. Where the optimizer-timing fix (e828320) builds it first (the WL
+        branches, including this one), it is in the optimizer like every other head: its
+        gradient is cleared each update and is part of grad_norm_train.
+          train/grad_norm_head   norm of path_value_net's gradient (accumulated, if it is
+                                 outside the optimizer)
+          train/grad_norm_train  norm over the parameters in the optimizer's param groups
+          train/grad_norm_total  the global norm clip_grad_norm_ computes, over all policy
+                                 parameters; total**2 = train**2 + (norm of any parameters
+                                 outside the optimizer)**2
           train/clip_coef        the factor it scales gradients by: min(1, max_norm / (total + 1e-6)),
                                  torch's own formula
         """
