@@ -659,14 +659,17 @@ class GraphTaxiEnv(BaseTaxiEnv):
         an intermediate plan step's observation is overwritten in the vec env's buffer by
         the same env's next plan step before collect_rollouts reads the buffer.
 
-        Only honoured for graph_convention="vilg" (returns True); oracle_sage and atom
-        ignore it (return False) and keep building every observation exactly as before.
+        Only honoured for the standard domain's graph_convention="vilg" (returns True);
+        oracle_sage and atom ignore it (return False) and keep building every observation
+        exactly as before. The ternary domain always declines, for every convention: its
+        simulator's act() has no build_obs argument, and its compact facts JSON (one wire
+        format for all three conventions) is cheap to build.
         If the skipped step ends the episode, step() builds the observation anyway, so
         terminal_observation is always the real JSON string.
 
         :return: True if the next step() will skip building its observation
         """
-        if self.graph_convention != "vilg":
+        if self.ternary or self.graph_convention != "vilg":
             return False
         self._skip_next_obs = True
         return True
