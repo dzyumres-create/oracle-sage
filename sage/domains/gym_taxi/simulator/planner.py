@@ -93,7 +93,7 @@ class Planner:
         wl_colour_ids, wl_histogram = wl_colours(
             projection.x, projection.edge_index, projection.edge_attr,
             num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
-            graph_convention=self.graph_convention,
+            graph_convention=self.graph_convention, domain="standard",
         )
         projection.wl_colours = wl_colour_ids
         projection.wl_histogram = wl_histogram.unsqueeze(0)

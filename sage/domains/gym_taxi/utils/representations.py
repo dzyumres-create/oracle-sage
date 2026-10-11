@@ -83,7 +83,7 @@ def env_to_graph(env):
     wl_colour_ids, wl_histogram = wl_colours(
         _x, _edge_index, _edge_attr,
         num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
-        graph_convention="oracle_sage",
+        graph_convention="oracle_sage", domain="standard",
     )
 
     return node_feats, edge_feats, edge_index, mask, global_feats, wl_colour_ids.tolist(), wl_histogram.tolist()
@@ -201,7 +201,7 @@ def env_to_vilg_graph(env):
     wl_colour_ids, wl_histogram = wl_colours(
         _x, _edge_index, _edge_attr,
         num_iterations=get_wl_num_iterations(), vocab=get_wl_vocab(), frozen=True,
-        graph_convention="vilg",
+        graph_convention="vilg", domain="standard",
     )
 
     return node_feats, edge_feats, edge_index, mask, global_feats, wl_colour_ids.tolist(), wl_histogram.tolist()
@@ -528,7 +528,7 @@ def atoms_to_json(atoms, global_feats):
     )
 
 
-def attach_wl(data, graph_convention="atom", site=None):
+def attach_wl(data, graph_convention="atom", site=None, domain="standard"):
     """
     Attaches wl_colours ([N]) and wl_histogram ([1, V]) to a single, UNBATCHED
     torch_geometric Data in place, in frozen mode, using whichever vocab/L is currently
@@ -577,6 +577,8 @@ def attach_wl(data, graph_convention="atom", site=None):
         both call sites this is used from
     :param site: if given, logs this call's OOV fraction under
         f"wl_atom/oov_fraction_{site}" (see above); None (default) logs nothing
+    :param domain: passed through to wl_colours() -- "standard" (the default) for both
+        current call sites
     :return: `data`, mutated in place (also returned so callers can chain e.g.
         `data.append(attach_wl(d))`)
     """
@@ -586,7 +588,7 @@ def attach_wl(data, graph_convention="atom", site=None):
     wl_colour_ids, wl_histogram = wl_colours(
         data.x, data.edge_index, data.edge_attr,
         num_iterations=get_wl_num_iterations(), vocab=vocab, frozen=True,
-        graph_convention=graph_convention,
+        graph_convention=graph_convention, domain=domain,
     )
     data.wl_colours = wl_colour_ids
     data.wl_histogram = wl_histogram.unsqueeze(0)

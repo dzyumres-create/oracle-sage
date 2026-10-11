@@ -249,6 +249,171 @@ def edge_labels_atom(edge_attr: th.Tensor) -> th.Tensor:
     return labels
 
 
+# --- ternary-predicate domain (domain="ternary") -----------------------------------------
+#
+# Decoders for the graphs built by sage/domains/gym_taxi/utils/ternary_representations.py
+# (facts_to_object_graph / facts_to_vilg_graph / facts_to_atom_graph). Their column layouts
+# are documented in wl_colours' docstring. Unlike the standard decoders above, every one of
+# these validates its input (0/1 or +-1 values, one-hot blocks) and raises on anything else,
+# so a malformed or foreign graph can never be decoded into plausible-looking colours.
+
+def _require_binary(tensor: th.Tensor, what: str) -> None:
+    if not th.all((tensor == 0) | (tensor == 1)):
+        raise ValueError(f"{what}: expected 0/1 values; got a value that is neither 0 nor 1.")
+
+
+def _require_one_hot_rows(tensor: th.Tensor, what: str) -> None:
+    _require_binary(tensor, what)
+    if not th.all(tensor.sum(dim=1) == 1):
+        raise ValueError(f"{what}: expected exactly one active column per row.")
+
+
+def initial_colours_ternary_object(x: th.Tensor) -> th.Tensor:
+    """
+    Ternary object encoding: x is the 3-column object-type one-hot [location, taxi,
+    passenger]. Colour = the active column (0=location, 1=taxi, 2=passenger).
+
+    :param x: node features, shape [N, 3]
+    :return: initial colour per node, shape [N], dtype long, values in {0, 1, 2}
+    """
+    _require_one_hot_rows(x, "initial_colours_ternary_object (x [N, 3])")
+    return th.argmax(x, dim=1).long()
+
+
+def edge_labels_ternary_object(edge_attr: th.Tensor) -> th.Tensor:
+    """
+    Ternary object encoding: the FULL 10-column edge vector as one integer key. Columns
+    0-8 (road, at, picked_up_at, req12, req21, req13, req31, req23, req32) are 0/1 bits,
+    several of which can be set on one directed pair (labels merged by the converter);
+    column 9 is the direction, +1 or -1. Key = sum(bit_k * 2^k, k = 0..8) + 512 if the
+    direction is -1, so every distinct vector gets a distinct key (nothing is argmax'ed
+    away).
+
+    :param edge_attr: edge attributes, shape [E, 10]
+    :return: label per edge, shape [E], dtype long, values in {1, ..., 1023}
+    """
+    bits = edge_attr[:, 0:9]
+    direction = edge_attr[:, 9]
+    _require_binary(bits, "edge_labels_ternary_object (edge_attr[:, 0:9])")
+    if not th.all((direction == 1) | (direction == -1)):
+        raise ValueError("edge_labels_ternary_object: the direction column (edge_attr[:, 9]) must be +1 or -1.")
+    if not th.all(bits.sum(dim=1) > 0):
+        raise ValueError(
+            "edge_labels_ternary_object: every object edge exists because some fact labels it; "
+            "got an edge with no label bit set."
+        )
+    weights = th.as_tensor([1 << k for k in range(9)], dtype=edge_attr.dtype, device=edge_attr.device)
+    return (bits * weights).sum(dim=1).long() + (direction < 0).long() * 512
+
+
+def initial_colours_ternary_vilg(x: th.Tensor) -> th.Tensor:
+    """
+    Ternary object-atom (vILG) encoding: x has 10 columns -- 0-2 object type [location,
+    taxi, passenger], 3-6 predicate [adjacent, in, picked_up_at, request], 7-9 goal status
+    [achieved_goal, unachieved_goal, achieved_nongoal]. An object row is a one-hot in 0-2
+    with 3-9 zero; a proposition row has 0-2 zero and exactly one active column in each of
+    3-6 and 7-9. Colour: object -> its type id (0-2); proposition ->
+    3 + predicate_id * 3 + status_id (3-14), the joint (predicate, status) id, as in
+    initial_colours_vilg.
+
+    :param x: node features, shape [N, 10]
+    :return: initial colour per node, shape [N], dtype long, values in {0, ..., 14}
+    """
+    _require_binary(x, "initial_colours_ternary_vilg (x [N, 10])")
+    obj, pred, status = x[:, 0:3], x[:, 3:7], x[:, 7:10]
+    obj_n, pred_n, status_n = obj.sum(dim=1), pred.sum(dim=1), status.sum(dim=1)
+    is_object = (obj_n == 1) & (pred_n == 0) & (status_n == 0)
+    is_proposition = (obj_n == 0) & (pred_n == 1) & (status_n == 1)
+    if not th.all(is_object | is_proposition):
+        raise ValueError(
+            "initial_colours_ternary_vilg: every row must be an object row (one-hot in columns "
+            "0-2, zeros elsewhere) or a proposition row (zeros in 0-2, one-hot in 3-6 and in 7-9)."
+        )
+    proposition_colour = 3 + pred.argmax(dim=1) * 3 + status.argmax(dim=1)
+    return th.where(is_object, obj.argmax(dim=1), proposition_colour).long()
+
+
+def edge_labels_ternary_vilg(edge_attr: th.Tensor) -> th.Tensor:
+    """
+    Ternary object-atom (vILG) encoding: edge_attr is the argument-position one-hot
+    [position 1, position 2, position 3] (both directions of an object<->proposition edge
+    carry the same position). Label = position - 1.
+
+    :param edge_attr: edge attributes, shape [E, 3]
+    :return: label per edge, shape [E], dtype long, values in {0, 1, 2}
+    """
+    _require_one_hot_rows(edge_attr, "edge_labels_ternary_vilg (edge_attr [E, 3])")
+    return th.argmax(edge_attr, dim=1).long()
+
+
+def initial_colours_ternary_atom(x: th.Tensor) -> th.Tensor:
+    """
+    Ternary atom encoding: x is the 7-column predicate one-hot [location, taxi, passenger,
+    adjacent, in, request, picked_up_at] (ATOM_PREDICATES_TERNARY -- note request precedes
+    picked_up_at here, unlike the vilg predicate block). Colour = the active column.
+
+    :param x: node features, shape [N, 7]
+    :return: initial colour per node, shape [N], dtype long, values in {0, ..., 6}
+    """
+    _require_one_hot_rows(x, "initial_colours_ternary_atom (x [N, 7])")
+    return th.argmax(x, dim=1).long()
+
+
+def edge_labels_ternary_atom(edge_attr: th.Tensor) -> th.Tensor:
+    """
+    Ternary atom encoding: edge_attr is a 9-bit multi-hot over the argument-position pairs
+    (i, j), i, j in 1..3, column (i-1)*3 + (j-1): a -> b has bit (i, j) when argument i of
+    atom a equals argument j of atom b. Label = the integer bitmask sum(bit_k * 2^k), so
+    co-occurring pairs are all kept (as in edge_labels_atom, generalised from 4 bits).
+
+    :param edge_attr: edge attributes, shape [E, 9]
+    :return: label per edge, shape [E], dtype long, values in {1, ..., 511}
+    """
+    _require_binary(edge_attr, "edge_labels_ternary_atom (edge_attr [E, 9])")
+    if not th.all(edge_attr.sum(dim=1) > 0):
+        raise ValueError(
+            "edge_labels_ternary_atom: every atom edge exists because two atoms share an "
+            "argument; got an edge with no label bit set."
+        )
+    weights = th.as_tensor([1 << k for k in range(9)], dtype=edge_attr.dtype, device=edge_attr.device)
+    return (edge_attr * weights).sum(dim=1).long()
+
+
+DOMAINS = ("standard", "ternary")
+
+# Decoder pair per (domain, graph_convention), and the (node, edge) feature widths each one
+# accepts. The widths are those of GraphTaxiEnv's GRAPH_CONVENTIONS (standard) and
+# TERNARY_GRAPH_CONVENTIONS (ternary); every pair of entries differs in at least one width,
+# which is what lets wl_colours reject a graph from the other domain.
+DECODERS = {
+    "standard": {
+        "oracle_sage": (initial_colours, edge_labels),
+        "vilg": (initial_colours_vilg, edge_labels_vilg),
+        "atom": (initial_colours_atom, edge_labels_atom),
+    },
+    "ternary": {
+        "oracle_sage": (initial_colours_ternary_object, edge_labels_ternary_object),
+        "vilg": (initial_colours_ternary_vilg, edge_labels_ternary_vilg),
+        "atom": (initial_colours_ternary_atom, edge_labels_ternary_atom),
+    },
+}
+FEATURE_WIDTHS = {
+    "standard": {"oracle_sage": (3, 4), "vilg": (9, 2), "atom": (6, 4)},
+    "ternary": {"oracle_sage": (3, 10), "vilg": (10, 3), "atom": (7, 9)},
+}
+
+
+def _check_widths(x: th.Tensor, edge_attr: th.Tensor, graph_convention: str, domain: str) -> None:
+    node_width, edge_width = FEATURE_WIDTHS[domain][graph_convention]
+    if x.dim() != 2 or x.shape[1] != node_width or edge_attr.dim() != 2 or edge_attr.shape[1] != edge_width:
+        raise ValueError(
+            f"wl_colours(graph_convention={graph_convention!r}, domain={domain!r}) expects x of shape "
+            f"[N, {node_width}] and edge_attr of shape [E, {edge_width}]; got x {tuple(x.shape)} and "
+            f"edge_attr {tuple(edge_attr.shape)}. A graph from the other domain (or convention) is "
+            f"never decoded with this decoder pair."
+        )
+
+
 def refine(
     node_colours: th.Tensor,
     edge_index: th.Tensor,
@@ -319,6 +484,7 @@ def wl_colours(
     vocab: Dict[Hashable, int] = None,
     frozen: bool = False,
     graph_convention: str = "oracle_sage",
+    domain: str = "standard",
 ) -> Tuple[th.Tensor, th.Tensor]:
     """
     Runs WL colour refinement for `num_iterations` steps and returns the
@@ -336,6 +502,53 @@ def wl_colours(
     gym_taxi/simulator/planner.py) rather than auto-detected from tensor
     width, since auto-detection by shape is fragile and could silently
     misfire if the two conventions' dimensions ever coincide.
+
+    `domain` selects the domain the graph comes from, explicitly, like
+    graph_convention: "standard" (default: the Taxi domain above, unchanged)
+    or "ternary" (the ternary-predicate domain, sage/domains/gym_taxi/utils/
+    ternary_representations.py), whose three conventions use the decoder pairs
+    initial_colours_ternary_*/edge_labels_ternary_* below. In BOTH domains the
+    feature widths are checked first (FEATURE_WIDTHS) and anything else raises
+    ValueError, so a ternary graph can never be decoded with a standard decoder
+    or vice versa: [N, 3]/[E, 4], [N, 9]/[E, 2] and [N, 6]/[E, 4] are the
+    standard oracle_sage/vilg/atom widths; the ternary ones follow.
+
+    Ternary column layouts, read from the converters in
+    ternary_representations.py (facts_to_object_graph, facts_to_vilg_graph,
+    facts_to_atom_graph). Every relational fact contributes to every
+    convention; rows are objects first (row k = object k: taxi 0, locations,
+    passengers), then, for vilg one row per relational fact and for atom one
+    row per fact, in facts() order.
+
+      object ("oracle_sage"), x [N, 3], edge_attr [E, 10]
+        x:  0 location | 1 taxi | 2 passenger                         (one-hot)
+        edge_attr, one row per directed object pair, labels merged (0/1):
+            0 road        adjacent(a,b): a->b and b->a
+            1 at          in(x,y): x->y, and y->x with dir -1
+            2 picked_up_at  picked_up_at(p,l): p->l, and l->p with dir -1
+            3 req12  4 req21  5 req13  6 req31  7 req23  8 req32
+                          request(p,o,d): req_ij on the edge from argument i
+                          to argument j (p=1, o=2, d=3), both directions
+            9 dir         +1, or -1 if the pair is the reverse of an in or
+                          picked_up_at fact (wins over any +1 label merged
+                          onto the same pair)
+      object-atom ("vilg"), x [N, 10], edge_attr [E, 3]
+        x:  object rows      0 location | 1 taxi | 2 passenger, 3-9 zero
+            proposition rows 0-2 zero,
+                             3 adjacent | 4 in | 5 picked_up_at | 6 request,
+                             7 achieved_goal | 8 unachieved_goal |
+                             9 achieved_nongoal (always 9: the ternary domain
+                             has no goal predicate)
+        edge_attr: 0 position 1 | 1 position 2 | 2 position 3 (one-hot); an
+            edge joins a proposition and its k-th argument, in BOTH directions,
+            with the same position-k label
+      atom ("atom"), x [N, 7], edge_attr [E, 9]
+        x:  0 location | 1 taxi | 2 passenger | 3 adjacent | 4 in | 5 request |
+            6 picked_up_at                                            (one-hot)
+        edge_attr: column (i-1)*3 + (j-1) for the argument-position pair (i, j),
+            i, j in 1..3, i.e. 0 (1,1) | 1 (1,2) | 2 (1,3) | 3 (2,1) | 4 (2,2) |
+            5 (2,3) | 6 (3,1) | 7 (3,2) | 8 (3,3); a->b (a != b) has bit (i, j)
+            when argument i of atom a equals argument j of atom b (multi-hot)
 
     The raw type ids from `initial_colours` are first mapped into the same
     shared `vocab` id space used by `refine` (under a signature tagged
@@ -376,6 +589,8 @@ def wl_colours(
         ValueError otherwise.
     :param graph_convention: "oracle_sage" (default), "vilg", or "atom" -
         selects the decoder pair, see above.
+    :param domain: "standard" (default) or "ternary" - selects the domain's
+        decoder pairs and feature widths, see above.
     :return: (colours, histogram)
         colours: final per-node colour id, shape [N], dtype long
         histogram: count of nodes with colour id i, shape [len(vocab)]
@@ -387,28 +602,22 @@ def wl_colours(
             f'wl_colours() got graph_convention={graph_convention!r}; expected '
             f'"oracle_sage", "vilg", or "atom".'
         )
+    if domain not in DOMAINS:
+        raise ValueError(f'wl_colours() got domain={domain!r}; expected "standard" or "ternary".')
 
     if vocab is None:
         vocab = {}
 
     _check_frozen_vocab(vocab, frozen, "wl_colours")
+    _check_widths(x, edge_attr, graph_convention, domain)
+    initial_colours_fn, edge_labels_fn = DECODERS[domain][graph_convention]
 
-    if graph_convention == "vilg":
-        type_colours = initial_colours_vilg(x).tolist()
-    elif graph_convention == "atom":
-        type_colours = initial_colours_atom(x).tolist()
-    else:
-        type_colours = initial_colours(x).tolist()
+    type_colours = initial_colours_fn(x).tolist()
     # Colours are kept as a Python list across iterations and turned into a tensor once at
     # the end (see _refine_list); resolution order, and so every id, is unchanged.
     colours = [_resolve(("init", type_id), vocab, frozen) for type_id in type_colours]
 
-    if graph_convention == "vilg":
-        labels = edge_labels_vilg(edge_attr)
-    elif graph_convention == "atom":
-        labels = edge_labels_atom(edge_attr)
-    else:
-        labels = edge_labels(edge_attr)
+    labels = edge_labels_fn(edge_attr)
     src, dst, labels = edge_index[0].tolist(), edge_index[1].tolist(), labels.tolist()
     for _ in range(num_iterations):
         colours = _refine_list(colours, src, dst, labels, vocab, frozen)
