@@ -34,6 +34,11 @@ TERNARY_OBS_STREAM_SHA256 = {
         "vilg": "48eea4957f30e57f3b90cec1f509f2c519634fed361f53cd36f615532eb25d69",
         "atom": "48eea4957f30e57f3b90cec1f509f2c519634fed361f53cd36f615532eb25d69",
     },
+    "gym0.18": {
+        "oracle_sage": "48eea4957f30e57f3b90cec1f509f2c519634fed361f53cd36f615532eb25d69",
+        "vilg": "48eea4957f30e57f3b90cec1f509f2c519634fed361f53cd36f615532eb25d69",
+        "atom": "48eea4957f30e57f3b90cec1f509f2c519634fed361f53cd36f615532eb25d69",
+    },
 }
 
 REFERENCE_COMMAND = (

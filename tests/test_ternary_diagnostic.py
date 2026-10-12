@@ -505,6 +505,14 @@ OLD_DOMAIN_INFO_REFERENCE_SHA256 = {
         "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
                  "2b27206df4a5a0985c185fd82e709ccdd5e1f2cbf2592d093823329941d5c570"),
     },
+    "gym0.18": {
+        "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
+                        "f0fc54c496d248c443abb91d03f4c4ef3023e1044df28c6521cc0991394b0708"),
+        "vilg": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
+                 "61d487d11c8e396694a755ca5a1ba67fe640afd7723938466203eff7e65eeb5c"),
+        "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
+                 "121d53778c32495842f6dd3f198fc6615405e03486b429b6456649b849efae1c"),
+    },
 }
 
 

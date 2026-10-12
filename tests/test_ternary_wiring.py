@@ -478,6 +478,11 @@ OLD_DOMAIN_REFERENCE_SHA256 = {
         "vilg": "6d13a91ad902e72d872e8c182e836d9d4c52d0d79e08377608eab605ed781e4a",
         "atom": "443aba261710f3dc090cd55617c1f0f019a4ec4a3ce3d04dc3cf5f358e346ecc",
     },
+    "gym0.18": {
+        "oracle_sage": "ac44fdcc8fa9095931a3bb03143651834363705fb019d0f98014588218f6ae88",
+        "vilg": "a34ed9b926f83233b876b51f4ad3e3155c8e093f575625514c655f89e1c26125",
+        "atom": "59ba07766f6bf0538f5952724e6d0ddcb5ed81849c9c8f95d4c900aad96be504",
+    },
 }
 
 
