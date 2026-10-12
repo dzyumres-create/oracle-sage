@@ -36,10 +36,12 @@ from torch_geometric.data import Batch
 from sage.agent.graph_policy import EMB_SIZE
 from sage.agent.graph_feedback_policy import PathValueNet
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
-from sage.domains.gym_taxi.utils.wl_vocab_cache import WL_VOCAB_PATH, _decode_signature, validate_wl_vocab_metadata
+from sage.domains.gym_taxi.utils.wl_vocab_cache import (
+    WL_VOCAB_PATH, _decode_signature, metadata_from_payload, validate_wl_vocab_metadata,
+)
 
 
-def _load_vocab(path, graph_convention=None, num_iterations=None) -> dict:
+def _load_vocab(path, graph_convention=None, num_iterations=None, domain="standard") -> dict:
     """
     Loads a frozen WL-colour vocab from an arbitrary `path`, in the same
     signature -> colour id format wl_colours() expects.
@@ -59,15 +61,14 @@ def _load_vocab(path, graph_convention=None, num_iterations=None) -> dict:
     None, matching every existing caller of this function/WLPlanFeedbackPolicy
     that never passed them (oracle_sage/vilg runs, and every current test) -
     None skips its respective check entirely, so those callers are
-    completely unaffected.
+    completely unaffected. `domain` ("standard" by default, or "ternary") is always
+    checked against the vocab's recorded domain - a file without one is "standard".
     """
     with open(path) as f:
         payload = json.load(f)
 
-    metadata = None
-    if "graph_convention" in payload and "num_iterations" in payload:
-        metadata = {"graph_convention": payload["graph_convention"], "num_iterations": payload["num_iterations"]}
-    validate_wl_vocab_metadata(metadata, graph_convention, num_iterations, "WLPlanFeedbackPolicy._load_vocab")
+    metadata = metadata_from_payload(payload)
+    validate_wl_vocab_metadata(metadata, graph_convention, num_iterations, "WLPlanFeedbackPolicy._load_vocab", domain)
 
     vocab = {}
     for entry in payload["entries"]:
@@ -103,7 +104,7 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
 
     def __init__(
         self, *args, wl_vocab_path: str = str(WL_VOCAB_PATH),
-        wl_num_iterations: int = None, graph_convention: str = None, **kwargs,
+        wl_num_iterations: int = None, graph_convention: str = None, wl_domain: str = "standard", **kwargs,
     ):
         # Must be set before super().__init__(): _build_gnn_extractor(),
         # called from within that chain, needs self.wl_vocab_path already
@@ -118,6 +119,8 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         # truth, not two independently-configured checks that could drift.
         self.wl_num_iterations = wl_num_iterations
         self.wl_graph_convention = graph_convention
+        # The vocab's domain ("standard" or "ternary"), checked by _load_vocab.
+        self.wl_domain = wl_domain
         super().__init__(*args, **kwargs)
         # No manual _build_path_value_net() call needed here: GNNPolicy._build()
         # (called from within super().__init__()'s chain, before optimizer
@@ -129,7 +132,7 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         # before that dispatch happens, so it's already available.
 
     def _build_gnn_extractor(self) -> None:
-        self._wl_vocab = _load_vocab(self.wl_vocab_path, self.wl_graph_convention, self.wl_num_iterations)
+        self._wl_vocab = _load_vocab(self.wl_vocab_path, self.wl_graph_convention, self.wl_num_iterations, self.wl_domain)
         self.wl_vocab_size = len(self._wl_vocab)
         self.gnn_extractor = WLEmbeddingExtractor(self.wl_vocab_size, EMB_SIZE)
 

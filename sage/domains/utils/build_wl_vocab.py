@@ -160,7 +160,8 @@ from sage.domains.gym_taxi import REWARDS
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.representations import env_to_graph, env_to_vilg_graph, env_to_atom_graph
 from sage.domains.gym_taxi.simulator.planner import Planner
-from sage.domains.utils.wl_colours import OOV_SIGNATURE, freeze_vocab, wl_colours
+from sage.domains.utils.wl_colours import DOMAINS, OOV_SIGNATURE, freeze_vocab, wl_colours
+from sage.domains.gym_taxi.utils.wl_vocab_cache import metadata_from_payload, validate_wl_vocab_domain
 
 # The exact config behind Oracle-SAGE's real Taxi training env-name,
 # `city-taxi-unmasked-v1` (see "Investigation notes" above) - the DEFAULT
@@ -542,7 +543,7 @@ def _git_commit():
         return None
 
 
-def save_vocab(vocab, path, graph_convention, num_iterations, build_procedure=None):
+def save_vocab(vocab, path, graph_convention, num_iterations, build_procedure=None, domain="standard"):
     """
     Saves `vocab` to `path` as JSON - see the module docstring for the encoding scheme.
     Also records `graph_convention`/`num_iterations` (L) as top-level metadata: a
@@ -559,7 +560,13 @@ def save_vocab(vocab, path, graph_convention, num_iterations, build_procedure=No
         commit) - recorded as-is under the "build_procedure" key, purely for
         provenance/reproducibility (never read back by validate_wl_vocab_metadata or
         any loader); omitted entirely when None, so old callers/readers are unaffected.
+    :param domain: "standard" (default) or "ternary". Recorded as a top-level "domain"
+        key only for a non-standard domain: a file without one is "standard" by
+        definition (wl_vocab_cache.recorded_domain), and leaving it out keeps a standard
+        vocab's file layout exactly what it was before domains existed.
     """
+    if domain not in DOMAINS:
+        raise ValueError(f"save_vocab: unknown domain {domain!r}; expected one of {DOMAINS}")
     entries = [
         {"signature": _encode_signature(signature), "id": colour_id}
         for signature, colour_id in vocab.items()
@@ -568,31 +575,37 @@ def save_vocab(vocab, path, graph_convention, num_iterations, build_procedure=No
         "vocab_size": len(vocab),
         "graph_convention": graph_convention,
         "num_iterations": num_iterations,
-        "entries": entries,
     }
+    if domain != "standard":
+        payload["domain"] = domain
+    payload["entries"] = entries
     if build_procedure is not None:
         payload["build_procedure"] = build_procedure
     with open(path, "w") as f:
         json.dump(payload, f)
 
 
-def load_vocab(path):
-    """Loads a vocab previously saved with `save_vocab` back into a signature -> id dict."""
+def load_vocab(path, domain="standard"):
+    """Loads a vocab previously saved with `save_vocab` back into a signature -> id dict.
+    Raises ValueError unless the vocab's recorded domain (absent = "standard") is `domain`."""
     with open(path) as f:
         payload = json.load(f)
+    validate_wl_vocab_domain(metadata_from_payload(payload), domain, "build_wl_vocab.load_vocab")
     vocab = {}
     for entry in payload["entries"]:
         vocab[_decode_signature(entry["signature"])] = entry["id"]
     return vocab
 
 
-def load_vocab_with_metadata(path):
+def load_vocab_with_metadata(path, domain="standard"):
     """Like `load_vocab`, but also returns the raw metadata dict (graph_convention,
-    num_iterations, vocab_size, build_procedure if present) alongside it - useful for
+    num_iterations, vocab_size, domain and build_procedure if present) alongside it - useful for
     measure-only tooling that needs to know what convention/L a saved vocab was built
-    for, rather than having the caller re-supply (and risk mismatching) that by hand."""
+    for, rather than having the caller re-supply (and risk mismatching) that by hand.
+    Same domain check as `load_vocab`."""
     with open(path) as f:
         payload = json.load(f)
+    validate_wl_vocab_domain(metadata_from_payload(payload), domain, "build_wl_vocab.load_vocab_with_metadata")
     vocab = {}
     for entry in payload["entries"]:
         vocab[_decode_signature(entry["signature"])] = entry["id"]

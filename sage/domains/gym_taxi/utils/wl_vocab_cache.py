@@ -58,13 +58,21 @@
    decode logic is reproduced here instead - it must stay in sync with
    build_wl_vocab.py's `_encode_signature`/`save_vocab`, which is what
    actually produced the file on disk.
+
+   Domain: a vocab also belongs to a domain, "standard" (TaxiWorldSimulator) or
+   "ternary" (TernaryTaxiWorldSimulator), recorded as a top-level "domain" key. A file
+   without that key is "standard" - every vocab file that predates the ternary domain.
+   Ternary and standard initial colours share the ("init", k) signature form, so
+   nothing inside wl_colours can tell a wrong-domain vocab apart; every loader checks
+   the recorded domain instead (validate_wl_vocab_domain), and a ternary vocab must
+   carry its full metadata (graph_convention, num_iterations, domain).
 """
 import json
 import warnings
 from functools import lru_cache
 from pathlib import Path
 
-from sage.domains.utils.wl_colours import OOV_SIGNATURE
+from sage.domains.utils.wl_colours import DOMAINS, OOV_SIGNATURE
 
 # The graph_convention="oracle_sage" default - see module docstring. Never
 # mutated at runtime; get_wl_vocab()/get_wl_num_iterations() fall back to
@@ -76,11 +84,13 @@ NUM_ITERATIONS = 1
 # override, use the oracle_sage default above". Always set/cleared together
 # via configure_wl_vocab_override()/reset_wl_vocab_override(), never
 # partially, so a vocab path and its matching L can never drift apart here.
+# _override_domain is the domain that override was validated for.
 _override_path = None
 _override_num_iterations = None
+_override_domain = None
 
 
-def configure_wl_vocab_override(path, num_iterations, graph_convention=None) -> None:
+def configure_wl_vocab_override(path, num_iterations, graph_convention=None, domain="standard") -> None:
     """
     Points get_wl_vocab()/get_wl_num_iterations() at an arbitrary vocab file
     and its matching L, instead of the oracle_sage default - e.g. to match
@@ -105,22 +115,26 @@ def configure_wl_vocab_override(path, num_iterations, graph_convention=None) -> 
     :param num_iterations: the L that vocab was built/frozen at
     :param graph_convention: expected graph_convention, or None to skip
         that check (see validate_wl_vocab_metadata)
+    :param domain: expected domain, "standard" (default) or "ternary" - checked against
+        the vocab's recorded domain (see validate_wl_vocab_domain)
     """
     path = Path(path)
     metadata = _load_metadata_from_path(str(path))
-    validate_wl_vocab_metadata(metadata, graph_convention, num_iterations, "configure_wl_vocab_override")
+    validate_wl_vocab_metadata(metadata, graph_convention, num_iterations, "configure_wl_vocab_override", domain)
 
-    global _override_path, _override_num_iterations
+    global _override_path, _override_num_iterations, _override_domain
     _override_path = path
     _override_num_iterations = num_iterations
+    _override_domain = domain
 
 
 def reset_wl_vocab_override() -> None:
     """Clears any override set by configure_wl_vocab_override(), reverting
     get_wl_vocab()/get_wl_num_iterations() to the oracle_sage default."""
-    global _override_path, _override_num_iterations
+    global _override_path, _override_num_iterations, _override_domain
     _override_path = None
     _override_num_iterations = None
+    _override_domain = None
 
 
 def is_wl_override_configured() -> bool:
@@ -161,26 +175,85 @@ def _load_vocab_from_path(path_str: str) -> dict:
     return vocab
 
 
+def metadata_from_payload(payload):
+    """
+    The metadata part of a parsed vocab file (see save_vocab/build_wl_vocab.py) - shared
+    by every loader, so they all read it the same way.
+
+    :return: {"graph_convention": str, "num_iterations": int}, plus "domain" if the file
+        records one, or None if the file predates this metadata (old vocab files - e.g.
+        the oracle_sage/vilg ones built before this existed - have neither key).
+    :raises ValueError: if the recorded domain is not one of DOMAINS, or a non-standard
+        domain is recorded without graph_convention/num_iterations (such a file could
+        otherwise pass as metadata-less, i.e. as a standard vocab)
+    """
+    domain = payload.get("domain")
+    if domain is not None and domain not in DOMAINS:
+        raise ValueError(f"vocab records unknown domain {domain!r}; expected one of {DOMAINS}")
+    if "graph_convention" not in payload or "num_iterations" not in payload:
+        if domain is not None and domain != "standard":
+            raise ValueError(
+                f"vocab records domain={domain!r} but not graph_convention/num_iterations - "
+                f"a {domain} vocab must carry its full metadata"
+            )
+        return None
+    metadata = {"graph_convention": payload["graph_convention"], "num_iterations": payload["num_iterations"]}
+    if domain is not None:
+        metadata["domain"] = domain
+    return metadata
+
+
 @lru_cache(maxsize=None)
 def _load_metadata_from_path(path_str: str):
     """
-    Reads just the "graph_convention"/"num_iterations" top-level keys a vocab file may
-    carry (see save_vocab/build_wl_vocab.py), cached by path like
-    _load_vocab_from_path (a second, separate cache - both read the same file at most
-    once per path, independently of each other).
-
-    :return: {"graph_convention": str, "num_iterations": int}, or None if the file
-        predates this metadata (old vocab files - e.g. the oracle_sage/vilg ones built
-        before this existed - have neither key).
+    Reads just the metadata keys a vocab file may carry (metadata_from_payload), cached
+    by path like _load_vocab_from_path (a second, separate cache - both read the same
+    file at most once per path, independently of each other).
     """
     with open(path_str) as f:
         payload = json.load(f)
-    if "graph_convention" not in payload or "num_iterations" not in payload:
-        return None
-    return {"graph_convention": payload["graph_convention"], "num_iterations": payload["num_iterations"]}
+    return metadata_from_payload(payload)
 
 
-def validate_wl_vocab_metadata(metadata, expected_graph_convention, expected_num_iterations, source: str) -> None:
+def recorded_domain(metadata) -> str:
+    """The domain a vocab belongs to: its recorded "domain", or "standard" when it records
+    none (every vocab file that predates the ternary domain)."""
+    if metadata is None:
+        return "standard"
+    return metadata.get("domain", "standard")
+
+
+def validate_wl_vocab_domain(metadata, expected_domain, source: str) -> None:
+    """
+    The domain check every vocab loader runs: the vocab's recorded domain must equal
+    `expected_domain`, and a ternary vocab must carry metadata at all (there are no
+    metadata-less ternary vocabs to stay compatible with).
+
+    :param metadata: metadata_from_payload's return value (a dict or None)
+    :param expected_domain: "standard" or "ternary"
+    :param source: caller name, used only in the raised message
+    :raises ValueError: on an unknown expected domain, missing ternary metadata, or a
+        domain mismatch
+    """
+    if expected_domain not in DOMAINS:
+        raise ValueError(f"{source}: unknown domain {expected_domain!r}; expected one of {DOMAINS}")
+    if expected_domain == "ternary" and metadata is None:
+        raise ValueError(
+            f"{source}: vocab has no recorded graph_convention/num_iterations/domain "
+            f"metadata, but a ternary run requires it - metadata-less vocab files all "
+            f"predate the ternary domain."
+        )
+    domain = recorded_domain(metadata)
+    if domain != expected_domain:
+        raise ValueError(
+            f"{source}: vocab was built for domain={domain!r}, but this run expects "
+            f"domain={expected_domain!r}."
+        )
+
+
+def validate_wl_vocab_metadata(
+    metadata, expected_graph_convention, expected_num_iterations, source: str, expected_domain="standard",
+) -> None:
     """
     Shared validation used by BOTH configure_wl_vocab_override() (below) and
     WLPlanFeedbackPolicy._load_vocab (sage/agent/wl_plan_feedback_policy.py) - the two
@@ -202,14 +275,23 @@ def validate_wl_vocab_metadata(metadata, expected_graph_convention, expected_num
       this check even once metadata exists); num_iterations is always checked once
       metadata is present, since colour ids are meaningless at the wrong L regardless
       of which convention they're for.
+    - domain (checked first, validate_wl_vocab_domain): the recorded domain must equal
+      expected_domain. A ternary run must also name its convention - with
+      expected_domain="ternary", expected_graph_convention=None raises rather than
+      skipping the convention check.
 
     :param metadata: return value of _load_metadata_from_path (a dict or None)
     :param expected_graph_convention: the convention this run needs, or None to skip
-        that specific check
+        that specific check (standard domain only)
     :param expected_num_iterations: the L this run needs
     :param source: caller name, used only in the raised message
-    :raises ValueError: on any mismatch, or on missing metadata for an "atom" run
+    :param expected_domain: "standard" (default) or "ternary"
+    :raises ValueError: on any mismatch, or on missing metadata for an "atom" or ternary run
     """
+    validate_wl_vocab_domain(metadata, expected_domain, source)
+    if expected_domain == "ternary" and expected_graph_convention is None:
+        raise ValueError(f"{source}: a ternary run must name the graph_convention its vocab is checked against.")
+
     if metadata is None:
         if expected_graph_convention == "atom":
             raise ValueError(
@@ -253,14 +335,27 @@ def get_wl_vocab_metadata():
     return _load_metadata_from_path(str(path))
 
 
-def get_wl_vocab():
+def get_wl_vocab(domain="standard"):
     """
     Loads (once per process per distinct path, then cached) the frozen
     WL-colour vocab from whichever path is active - the one set by
     configure_wl_vocab_override(), or WL_VOCAB_PATH (the oracle_sage
     default) if no override is configured - in the signature -> colour id
     format `wl_colours()` expects for its `vocab` argument.
+
+    :param domain: the domain the caller colours. Raises ValueError unless it is the
+        domain the active vocab was validated for: the override's (configure_wl_vocab_override's
+        `domain`), or "standard" for the default - so there is no ternary default to
+        fall back to. A plain comparison, no file read: cheap on every env step.
     """
+    if domain not in DOMAINS:
+        raise ValueError(f"get_wl_vocab: unknown domain {domain!r}; expected one of {DOMAINS}")
+    active_domain = _override_domain if _override_path is not None else "standard"
+    if domain != active_domain:
+        raise ValueError(
+            f"get_wl_vocab: the active vocab is for domain={active_domain!r}, but the caller "
+            f"colours domain={domain!r} - configure_wl_vocab_override(..., domain={domain!r}) first."
+        )
     path = _override_path if _override_path is not None else WL_VOCAB_PATH
     return _load_vocab_from_path(str(path))
 
