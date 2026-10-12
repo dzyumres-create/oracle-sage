@@ -102,9 +102,11 @@ where `<encoded>` is a small tagged JSON object - see `_encode_signature` /
 import argparse
 import copy
 import json
+import random as pyrandom
 import subprocess
 import time
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 import numpy as np
 
@@ -509,6 +511,166 @@ def sample_graphs(
     return total_graphs
 
 
+# ==========================================================================================
+# Ternary domain (TernaryTaxiWorldSimulator, GraphTaxiEnv(ternary=True))
+# ==========================================================================================
+
+TERNARY_SCENARIO = "city_ternary"
+# The settings of the standard domain's *_L1_full vocabs (their recorded build_procedure).
+TERNARY_DEFAULTS = {"episodes": 84, "sample_every": 10, "seed": 0, "eps": 0.2, "goals_per_state": 2}
+TERNARY_POLICY_MIX = (
+    "first half of episodes: tests.test_ternary_world.scripted_policy with random_prob=eps "
+    "(nearest waiting passenger, then its destination via the picked_up_at/request join); "
+    "second half: uniform random legal actions (tests.test_ternary_world.legal_actions)"
+)
+TERNARY_RNG = (
+    "env.np_random = numpy RandomState(seed), assigned after construction (so the maze/spawn "
+    "stream is the same on every gym version); policy: random.Random(seed); projection "
+    "goals: numpy RandomState(seed)"
+)
+
+
+class TernarySample(NamedTuple):
+    """One graph of the ternary corpus. `goal` is None for a live state, else the node id
+    whose Planner.plan projection `data` is (projected from the live state just before it).
+    `env` is the live env, valid only until the generator is advanced -- callers that need
+    simulator internals (analysis only) must read them before asking for the next sample."""
+    episode: int
+    step: int
+    goal: Optional[int]
+    data: Data
+    env: GraphTaxiEnv
+
+
+def ternary_env(graph_convention, seed, scenario=TERNARY_SCENARIO):
+    """GraphTaxiEnv(ternary=True) with its RNG replaced by a numpy RandomState(seed): gym
+    0.26's seeding hands back a Generator and gym 0.18's a RandomState, whose streams differ,
+    so env.seed(seed) would give different mazes on the Mac and on RCP. The replacement is
+    used from the next reset() on (every episode starts with one)."""
+    env = GraphTaxiEnv(
+        representation="graph", scenario=scenario, mask=MASK, rewards=REWARDS_VARIANT,
+        graph_convention=graph_convention, ternary=True,
+    )
+    env.np_random = np.random.RandomState(seed)
+    return env
+
+
+def ternary_corpus(
+    episodes, sample_every, seed, graph_convention, eps=TERNARY_DEFAULTS["eps"],
+    goals_per_state=TERNARY_DEFAULTS["goals_per_state"], max_steps=2500, scenario=TERNARY_SCENARIO,
+):
+    """
+    The ternary corpus, through the production path end to end: GraphTaxiEnv(ternary=True)
+    emits its facts JSON, the env's own observation-space converter
+    (json_to_ternary_graph_*) decodes it, and the env's own Planner(ternary=True)
+    (plan_ternary) projects it -- the same objects a training run uses.
+
+    Each of `episodes` FULL episodes (to the env's own done: the 2000-step timeout or the
+    delivery limit; max_steps is only a safety cap) is played from a fresh reset(). The
+    first half use scripted_policy with random_prob=eps, the second half uniform random
+    legal actions -- the standard domain's corpus design (sample_graphs), with the ternary
+    domain's scripted policy in place of greedy_action. Every `sample_every` steps the live
+    state is yielded, then up to `goals_per_state` projections towards distinct random
+    selectable nodes (data.mask).
+
+    Deterministic in `seed` on every stack (see ternary_env, TERNARY_RNG). The trajectory
+    and the goals do not depend on graph_convention -- only how each state is encoded (and,
+    for oracle_sage, which hypothesis the object decoder projects from).
+
+    :yield: TernarySample
+    """
+    # Function-local: tests/ is importable from the repo root (PYTHONPATH=.), and this keeps
+    # the standard-domain code path free of the import. The ternary scripted policy lives
+    # there; the analysis scripts and tests use the same one.
+    from tests.test_ternary_world import legal_actions, scripted_policy
+
+    env = ternary_env(graph_convention, seed, scenario)
+    converter = env.observation_space.converter
+    planner = env.observation_space.planner
+    policy_rng = pyrandom.Random(seed)
+    goal_rng = np.random.RandomState(seed)
+    half = episodes // 2
+
+    for episode in range(episodes):
+        obs = env.reset()
+        scripted = episode < half
+        for step in range(max_steps):
+            if step % sample_every == 0:
+                data = converter([[obs]]).to_data_list()[0]
+                yield TernarySample(episode, step, None, data, env)
+                selectable = data.mask.nonzero(as_tuple=True)[0].tolist()
+                n_goals = min(goals_per_state, len(selectable))
+                if n_goals > 0:
+                    for goal in goal_rng.choice(selectable, size=n_goals, replace=False):
+                        projection, _actions = planner.plan(data, int(goal))
+                        yield TernarySample(episode, step, int(goal), projection, env)
+            if scripted:
+                action = scripted_policy(env.sim, policy_rng, random_prob=eps)
+            else:
+                action = policy_rng.choice(legal_actions(env.sim))
+            obs, _reward, done, _info = env.step(action)
+            if done:
+                break
+
+
+def ternary_default_out_path(graph_convention, num_iterations, scenario=TERNARY_SCENARIO):
+    """wl_vocab_taxi_city_ternary_{convention}_L{L}.json -- the convention is always part of
+    the name (oracle_sage too), unlike the standard domain's default_out_path."""
+    return Path(__file__).parent / f"wl_vocab_taxi_{scenario}_{graph_convention}_L{num_iterations}.json"
+
+
+def build_ternary_vocab(
+    graph_convention, num_iterations, out_path=None, episodes=TERNARY_DEFAULTS["episodes"],
+    sample_every=TERNARY_DEFAULTS["sample_every"], seed=TERNARY_DEFAULTS["seed"],
+    eps=TERNARY_DEFAULTS["eps"], goals_per_state=TERNARY_DEFAULTS["goals_per_state"],
+    max_steps=2500, log_every=1000, scenario=TERNARY_SCENARIO,
+):
+    """
+    Builds and saves a frozen ternary vocab: growing-mode
+    wl_colours(domain="ternary") over every graph of ternary_corpus, in order, then
+    freeze_vocab (adds the OOV entry) and save_vocab with domain="ternary" and the full
+    metadata a ternary loader requires.
+
+    :return: (out_path, total_graphs, vocab_size)
+    """
+    if out_path is None:
+        out_path = str(ternary_default_out_path(graph_convention, num_iterations, scenario))
+    vocab = {}
+    total_graphs = 0
+    last_checkpoint_size = 0
+    for sample in ternary_corpus(episodes, sample_every, seed, graph_convention, eps, goals_per_state, max_steps, scenario):
+        wl_colours(
+            sample.data.x, sample.data.edge_index, sample.data.edge_attr,
+            num_iterations=num_iterations, vocab=vocab, frozen=False,
+            graph_convention=graph_convention, domain="ternary",
+        )
+        total_graphs += 1
+        if log_every and total_graphs % log_every == 0:
+            delta = len(vocab) - last_checkpoint_size
+            print(f"  graphs={total_graphs:>6}  episode={sample.episode:>3}  vocab_size={len(vocab):>7}  (+{delta})", flush=True)
+            last_checkpoint_size = len(vocab)
+    vocab_size = freeze_vocab(vocab)
+    build_procedure = {
+        "scenario": scenario,
+        "episodes": episodes,
+        "sample_every": sample_every,
+        "eps": eps,
+        "goals_per_state": goals_per_state,
+        "seed": seed,
+        "max_steps": max_steps,
+        "policy_mix": TERNARY_POLICY_MIX,
+        "rng": TERNARY_RNG,
+        "full_episodes": True,
+        "total_graphs": total_graphs,
+        "git_commit": _git_commit(),
+    }
+    save_vocab(
+        vocab, out_path, graph_convention=graph_convention, num_iterations=num_iterations,
+        build_procedure=build_procedure, domain="ternary",
+    )
+    return out_path, total_graphs, vocab_size
+
+
 def _encode_signature(signature):
     if signature == OOV_SIGNATURE:
         return {"kind": "oov"}
@@ -617,19 +779,26 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build a frozen WL-colour vocab for the Taxi domain by sampling a live GraphTaxiEnv."
     )
-    parser.add_argument("--episodes", type=int, default=20, help="number of FULL episodes to run (not step-capped)")
-    parser.add_argument("--sample-every", type=int, default=50, help="sample a state every this many simulator steps within each episode")
+    parser.add_argument(
+        "--domain", default="standard", choices=["standard", "ternary"],
+        help="standard (default, unchanged behaviour) or ternary: GraphTaxiEnv(ternary=True, "
+             "scenario='city_ternary'), see ternary_corpus. The ternary defaults are the "
+             "standard *_L1_full vocabs' settings: --episodes 84 --sample-every 10 --seed 0; "
+             "-L must be given.",
+    )
+    parser.add_argument("--episodes", type=int, default=None, help="number of FULL episodes to run (not step-capped; default 20, ternary 84)")
+    parser.add_argument("--sample-every", type=int, default=None, help="sample a state every this many simulator steps within each episode (default 50, ternary 10)")
     parser.add_argument("--seed", type=int, default=0, help="seeds env.seed() (mazes/spawns) and goal selection")
     parser.add_argument("--eps", type=float, default=0.2, help="exploration probability for the greedy half of episodes")
     parser.add_argument("--goals-per-state", type=int, default=2, help="planner-projected candidate goals sampled per visited state (0 disables projections)")
     parser.add_argument("--log-every", type=int, default=100)
     parser.add_argument(
-        "--scenario", default=SCENARIO,
+        "--scenario", default=None,
         help=f"GraphTaxiEnv scenario key (default {SCENARIO!r}, matching {ENV_NAME} - "
-             f"the real Oracle-SAGE Taxi training config). Override for diagnostics.",
+             f"the real Oracle-SAGE Taxi training config; ternary: {TERNARY_SCENARIO!r}). Override for diagnostics.",
     )
     parser.add_argument(
-        "-L", "--num-iterations", type=int, default=NUM_ITERATIONS,
+        "-L", "--num-iterations", type=int, default=None,
         help=f"WL refinement iterations, i.e. depth L (default {NUM_ITERATIONS}, matching "
              f"Oracle-SAGE's gnn_steps=5 default - but see the module docstring: this default "
              f"does not currently produce a stabilizing vocab; L=1 was the only depth found to "
@@ -650,6 +819,33 @@ def main():
              "env_to_atom_graph.",
     )
     args = parser.parse_args()
+
+    if args.domain == "ternary":
+        if args.num_iterations is None:
+            parser.error("--domain ternary requires -L/--num-iterations")
+        start = time.time()
+        out_path, total_graphs, vocab_size = build_ternary_vocab(
+            args.graph_convention, args.num_iterations, out_path=args.out,
+            episodes=TERNARY_DEFAULTS["episodes"] if args.episodes is None else args.episodes,
+            sample_every=TERNARY_DEFAULTS["sample_every"] if args.sample_every is None else args.sample_every,
+            seed=args.seed, eps=args.eps, goals_per_state=args.goals_per_state,
+            scenario=TERNARY_SCENARIO if args.scenario is None else args.scenario,
+        )
+        print(f"sampled {total_graphs} ternary graphs, graph_convention={args.graph_convention!r}, L={args.num_iterations}")
+        print(f"vocab_size (frozen, includes OOV) = {vocab_size}")
+        print(f"wrote {out_path}")
+        print(f"elapsed: {time.time() - start:.1f}s")
+        return
+
+    # Standard domain: the defaults it always had.
+    if args.episodes is None:
+        args.episodes = 20
+    if args.sample_every is None:
+        args.sample_every = 50
+    if args.scenario is None:
+        args.scenario = SCENARIO
+    if args.num_iterations is None:
+        args.num_iterations = NUM_ITERATIONS
     out_path = args.out if args.out is not None else str(default_out_path(args.scenario, args.num_iterations, args.graph_convention))
 
     start = time.time()
