@@ -11,7 +11,7 @@
    - the GNN early in the episode, when a short non-delivering goal is among the candidates;
    - the WL discriminator in middle and late states, against longer passengers.
    The GNN picks the shortest passenger more often overall (22.0% vs 12.8%) because its actor proposes it more often (29.8% vs 17.7%): the WL actor spends a third of its probability on locations. The trip-length gap (+11 vs +20 frames over the shortest) also reflects ranking: the GNN discriminator's favourite passenger is always the shortest; the WL discriminator's is 15 frames longer on average.
-5. **In performance, the GNN behaves like "the shortest of 3 random passengers" and WL like "a random passenger".** The GNN models make 55.5–56.7 deliveries per episode against 57.1 for that reference policy. Cell 3 makes 48.2 against 46.6, with overlapping confidence intervals. All are far below greedy (71.8) and a policy that always takes the shortest-plan passenger (70.7).
+5. **In performance, the GNN behaves like "the shortest of 3 random passengers" and WL like "a random passenger".** The GNN models make 55.5–56.7 deliveries per episode against 57.1 for that reference policy. Cell 3 makes 48.2 against 46.6, with overlapping confidence intervals. All are far below greedy (71.8) and a policy that always takes the shortest-plan passenger (70.7). The gap to greedy is almost entirely in the pickup leg (7.2 frames per delivery for greedy, 16.4 for Cell 1, 20.9 for Cell 3); trip lengths are similar for all policies.
 6. **The two training bugs were silent and harmless here; the actor clamp is silent but binding.** Cell 1-fixed (stale-edge fix and optimizer fix) matches old Cell 1 on every behavioural measure and delivers 55.5 per episode, within old Cell 1's range.
 
 ## Setup
@@ -82,6 +82,47 @@ The reference policies choose among waiting passengers only (a 1-frame no-op if 
 - Both GNN models sit at the "best of 3 random passengers" level. That is what an actor that proposes passengers uniformly plus a discriminator that picks the shortest proposal would give.
 - Cell 3 sits at the "random passenger" level (48.2 vs 46.6, intervals overlapping).
 - Old Cell 1 gives the same result on clean graphs in 9 of 10 episodes, so it did not come to depend on the stale edges it trained with.
+
+### The greedy reference: rule and fairness checks
+
+**Rule.** Greedy (`analysis/greedy.py`, copied verbatim from `cell6-wl-atom`, commit ffb504f) decides one primitive action per frame:
+- *Carrying a passenger:* take one step along a shortest road path to the passenger's destination; drop off on arrival.
+- *Empty:* target the waiting passenger with the fewest road hops from the taxi, take one step towards them, and pick up on arrival. The passenger's trip length is ignored.
+- *Nobody waiting:* stay (never happened in the 10 episodes).
+
+Distances are hop counts on the walled road graph: the road edges of the city maze, read once per episode (the roads never change, and every road edge goes both ways). Ties in distance (11.4% of empty-taxi frames) go to the earliest-spawned passenger, which is the lowest node id. The target is re-chosen every frame, with no memory. In practice it rarely changes: over 724 pickup legs the target switched 22 times, usually because a closer passenger spawned, and 97.0% of legs picked up the passenger they started towards.
+
+**Fairness checks** (10 episodes, seeds 100–109, 20,000 frames; `analysis/check_greedy_reference.py`):
+- *Same interface:* one `env.step` per frame; every move is a single road hop, and pickups and drop-offs are the same node actions the planner emits. No action was illegal or without effect.
+- *Same scoring:* deliveries are the environment's own count, equal to its reward. Every episode runs to the 2,000-frame timeout.
+- *No extra information:* a re-implementation that reads only the observation graph the policies get (parsed with the planner's own `graph_to_networkx`) reproduces greedy's target and exact action in 20,000 of 20,000 frames.
+- *No knowledge of future spawns:* greedy never touches the simulator's random number generator. Its state was unchanged by the greedy call in every frame.
+- *Same episodes:* re-running all policies with frame recording reproduces the published delivery counts exactly.
+
+Greedy is a myopic heuristic, not an upper bound. Its advantage over the learned policies is that it is handed exact shortest-path distances, which they have to learn. A per-frame trace of one greedy episode (seed 100: taxi position, target, pickups and drop-offs) is kept locally at `analysis/results/audit/greedy/greedy_trace_seed100.csv`; it is not in git and can be regenerated with the script.
+
+### Where the frames go: pickup leg vs trip
+
+Frames per delivery, pooled over seeds 100–109 (total frames ÷ total deliveries). The pickup leg runs from the previous drop-off to the pickup action, inclusive. The trip runs from after the pickup to the drop-off action, inclusive. "Road" is the shortest road distance; "extra" counts moving frames beyond it (the models' move goals).
+
+| Policy | Deliveries | Frames per delivery | Pickup leg: road + extra + action | Trip: road + action | After last drop-off |
+|---|---|---|---|---|---|
+| Greedy | 71.8 | 27.9 | **7.2** = 6.2 + 0.0 + 1 | 20.5 = 19.5 + 1 | 0.2 |
+| Shortest-plan passenger | 70.7 | 28.3 | 10.3 = 9.3 + 0.0 + 1 | 17.8 = 16.8 + 1 | 0.2 |
+| Best of 3 random passengers | 57.1 | 35.0 | 16.0 = 15.0 + 0.0 + 1 | 18.7 = 17.7 + 1 | 0.4 |
+| Cell 1 (GNN) | 56.7 | 35.3 | **16.4** = 14.8 + 0.5 + 1 | 18.5 = 17.5 + 1 | 0.4 |
+| Random passenger | 46.6 | 42.9 | 21.3 = 20.3 + 0.0 + 1 | 21.3 = 20.3 + 1 | 0.3 |
+| Cell 3 (WL) | 48.2 | 41.5 | **20.9** = 19.0 + 0.8 + 1 | 20.1 = 19.1 + 1 | 0.5 |
+
+No policy idles: non-moving frames other than the pickup and drop-off actions are below 0.05 per delivery for all of them. Trips are always driven on shortest paths.
+
+**Reading.**
+- **The gap to greedy is in the pickup leg.** Trips are 17.8–21.3 frames for every policy. The pickup leg ranges from 7.2 frames (greedy) to 16.4 (Cell 1) and 20.9 (Cell 3). Cell 1 spends 9.2 more pickup frames per delivery than greedy and recovers 2.0 on shorter trips; Cell 3 spends 13.7 more.
+- **The learned splits match the uniform-proposal references.** Cell 1's split (16.4 / 18.5) matches best of 3 random passengers (16.0 / 18.7). Cell 3's (20.9 / 20.1) is close to a random passenger (21.3 / 21.3).
+- **This is consistent with the uniform actors.** Both actors propose passengers uniformly, and a random waiting passenger is on average 20 hops from the taxi. Picking the shortest of three (the GNN discriminator) shortens the pickup leg only to about 15 hops. Greedy searches all waiting passengers and finds one about 6 hops away. A trained discriminator cannot close that gap: it only ranks the three proposals. Closing it would take an actor able to prefer nearby passengers, which the clamp (GNN) and identical WL colours (WL, L = 1) prevent.
+- **Committing to whole plans is not what costs deliveries.** The shortest-plan policy executes plans open-loop like the models and nearly matches greedy (70.7 vs 71.8). It trades pickup for trip (10.3 / 17.8), because it chooses on total plan length rather than pickup distance.
+
+**Frames per delivery vs frames per decision.** For Cell 1, frames per delivery (35.3) is higher than frames per decision (32.9, the end-to-end evaluation). Both divide the same 20,000 frames, but by different counts: of 608 decisions, 567 delivered. The other 41 were 31 move or no-op decisions (no-ops last 1 frame) and 10 trips cut off by the 2,000-frame timeout, one per episode. For Cell 3: 41.5 vs 38.7 (517 decisions, 482 deliveries; 26 moves and 9 trips cut off). So deliveries ≈ decisions × pickup-and-deliver share, minus one unfinished trip per episode.
 
 ### Goal selection: actor vs discriminator (495 states × 20 draws, pooled; 95% CIs)
 
