@@ -40,7 +40,8 @@ from sage.domains.utils import build_wl_vocab
 from sage.domains.utils.wl_colours import OOV_SIGNATURE, wl_colours
 
 CONVENTIONS = ("oracle_sage", "vilg", "atom")
-LEVELS = (1, 2)
+# L=1 only: frozen L=2 vocabs were dropped (held-out OOV 1.9-93%; see analysis/README.md).
+LEVELS = (1,)
 HELD_OUT_SEEDS = (1001, 1002, 1003, 1004, 1005)
 EPISODES_PER_SEED = 2
 SAMPLE_EVERY = 10

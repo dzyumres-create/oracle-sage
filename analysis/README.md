@@ -174,3 +174,52 @@ Analysis of $n = 1,395$ carried-passenger decision states:
 
 **Equivalence Proof:**
 The exact parity between crossed states and object-encoding ambiguity is deterministic rather than coincidental at $k=2$. Under generator Rule 2, buddy pairs share the identical destination multiset via cyclical rotation without redraws. Whenever an unboarded buddy remains present at the shared origin, its destination is guaranteed to belong to the carried passenger's destination multiset. Therefore, $\text{crossed} \implies \text{ambiguous}$ holds deterministically under this generator, with no extra non-buddy-driven ambiguity observed in this sample.
+---
+
+## Frozen WL vocabularies on the ternary domain (production converters)
+
+**Finding: frozen WL at L=2 is impractical on this domain.** A frozen vocab is built by
+`sage/domains/utils/build_wl_vocab.py --domain ternary` (growing-mode
+`wl_colours(domain="ternary")` over a corpus of full `GraphTaxiEnv(ternary=True)` episodes:
+first half `scripted_policy` with 20% random actions, second half uniform random legal
+actions; a live state every 10 steps plus 2 planner projections; seed 0). Held-out OOV
+is measured by `analysis/ternary_vocab_oov.py` on seeds 1001–1005 (two full episodes each,
+same mix; 6,000 graphs, including late-episode states and projections). "Request" nodes are
+request propositions (vilg), request atoms (atom), and for object — which has none — the
+passenger and location nodes.
+
+L=2, 84-episode corpus (50,400 graphs):
+
+| convention | vocab size | file | OOV overall | passenger | request |
+|---|---|---|---|---|---|
+| object (oracle_sage) | 57,743 | 7.8 MB | 5.46% | **25.13%** | 5.47% |
+| vILG | 10,230 | 1.1 MB | 0.13% | 0.00% | **1.86%** |
+| atom | 526,374 | **115 MB** | **15.34%** | **27.43%** | **93.16%** |
+
+Held-out OOV against corpus size (same seed and mix, first 21 / 42 / 84 / 336 episodes),
+at the node type that fails:
+
+| vocab | nodes | 21 | 42 | 84 | 336 |
+|---|---|---|---|---|---|
+| object L=2 | passenger | 43.56% | 34.15% | 25.13% | — |
+| vILG L=2 | request | 7.54% | 2.95% | 1.86% | — |
+| atom L=1 | request | 8.61% | 4.44% | 2.53% | 1.02% |
+| (atom L=1 overall) | all | 0.54% | 0.26% | 0.16% | 0.07% |
+
+At L=2 a node's signature combines the L=1 classes of several neighbours (for an object
+passenger: four or five locations, each already encoding its degree and the facts at it),
+so nearly every combination in a new episode is unseen: object L=2 OOV falls only ~1.3×
+per doubling of the corpus, and atom L=2 is both 93% OOV at request atoms and over
+GitHub's 100 MB file limit. Frozen L=2 vocabs are therefore not built or committed; L=2
+(and L=3) appear below only as growing-vocab analysis.
+
+L=1, 336-episode corpus (201,600 graphs):
+
+| convention | vocab size | file | OOV overall | passenger | request |
+|---|---|---|---|---|---|
+| object (oracle_sage) | 683 | 113 KB | 0.01% | 0.00% | 0.01% |
+| vILG | 420 | 67 KB | 0.00% | 0.00% | 0.00% |
+| atom | 19,100 | 4.3 MB | 0.07% | 0.00% | **1.02%** |
+
+Atom L=1's request-atom OOV is still falling (~1.6× per doubling between 84 and 336
+episodes), but reaches only 1.02% at 336 episodes.
