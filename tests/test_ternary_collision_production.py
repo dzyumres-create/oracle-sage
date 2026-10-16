@@ -162,6 +162,17 @@ class TestShortRun(unittest.TestCase):
         cls.report = tcp.run(seeds=(7,), episodes=2, sample_every=40, max_steps=600, use_frozen=False,
                              spot_checks=2, log=False, compare_prototype=False)
 
+    def test_cells_count_distinct_pairs(self):
+        report = self.report
+        row = report["conventions"]["atom"]["summary"]["growing_L1"]
+        hits, n, pairs, ci = row["M1"]
+        self.assertLessEqual(pairs, report["distinct_crossed_pairs"])
+        self.assertGreater(pairs, 0)
+        self.assertGreaterEqual(n, report["crossed_live_states"])  # live states plus projections
+        self.assertLessEqual(ci[0], hits / n)
+        self.assertGreaterEqual(ci[1], hits / n)
+        self.assertEqual(row["M3"][2], report["distinct_waiting_pairs"])
+
     def test_crossed_pairs_exist_and_are_proven_nonisomorphic(self):
         crossed = self.report["crossed_live_states"]
         self.assertGreater(crossed, 0)
@@ -186,6 +197,23 @@ class TestShortRun(unittest.TestCase):
             with self.subTest(convention=convention):
                 self.assertEqual(r["spot_check_disagreements"], [])
                 self.assertGreater(sum(v[0] for v in r["spot_checks"].values()), 0)
+
+
+class TestClusterBootstrap(unittest.TestCase):
+    def test_degenerate_and_cluster_weighting(self):
+        import numpy as np
+        rng = np.random.default_rng(0)
+        self.assertEqual(tcp.cluster_bootstrap([(c, True) for c in range(10)], rng), [1.0, 1.0])
+        self.assertEqual(tcp.cluster_bootstrap([(c, False) for c in range(10)], rng), [0.0, 0.0])
+        self.assertIsNone(tcp.cluster_bootstrap([], rng))
+        # 1000 observations of ONE colliding pair + 1 observation each of 9 distinct pairs:
+        # the point rate is ~99%, but with 10 pairs the CI must reach far below it.
+        values = [("a", True)] * 1000 + [(c, False) for c in range(9)]
+        low, high = tcp.cluster_bootstrap(values, rng)
+        self.assertLess(low, 0.5)
+        self.assertGreater(high, 0.99)
+        hits, n, pairs, _ci = tcp._cell(values, rng)
+        self.assertEqual((hits, n, pairs), (1000, 1009, 10))
 
 
 class TestPrototypeComparison(unittest.TestCase):

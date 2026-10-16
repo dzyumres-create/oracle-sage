@@ -6,8 +6,9 @@
    `in` facts, matched at graph level only, and used a growing vocab only.
 
 States: build_wl_vocab.ternary_corpus (the corpus design the vocabs were built from) on
-SEEDS, disjoint from the vocab seed (0) and the held-out OOV seeds (1001-1005): two full
-episodes per seed (scripted_policy with random_prob 0.2, then uniform random legal
+seeds 2001, 2002, ... (whole seeds, added until the crossed states hold at least
+MIN_DISTINCT_CROSSED_PAIRS distinct buddy pairs), disjoint from the vocab seed (0) and the
+held-out OOV seeds (1001-1005): two full episodes per seed (scripted_policy with random_prob 0.2, then uniform random legal
 actions), a live state every SAMPLE_EVERY steps plus 2 planner projections per state
 (the corpus' own goals). The trajectory does not depend on the convention, so it is
 sampled once and every state is encoded for all three conventions through the policy-side
@@ -41,6 +42,11 @@ through a projected delivery's renumbering.
 
 One shared growing vocab per (convention, L) across every graph, as in the prototype, so
 equal colours mean WL-equivalent nodes (equal histograms: WL-equivalent graphs).
+
+Consecutive states of one buddy pair are strongly autocorrelated (a pair crossed under the
+random policy stays crossed for the rest of the episode), so every cell reports n as
+observations AND as distinct buddy pairs, with a 95% bootstrap CI that resamples distinct
+pairs (cluster_bootstrap).
 
 Checks (run by main, written before the results were seen):
   - object M1 must be 100% at every L: the object encodings of a crossed state and its
@@ -98,9 +104,11 @@ from tests.test_ternary_world import crossed_state
 
 CONVENTIONS = ("oracle_sage", "vilg", "atom")
 GROWING_LEVELS = (1, 2, 3)
-FROZEN_LEVELS = (1, 2)
-SEEDS = (2001, 2002, 2003, 2004, 2005)
+FROZEN_LEVELS = (1,)
+FIRST_SEED = 2001
+MIN_DISTINCT_CROSSED_PAIRS = 200
 EPISODES_PER_SEED = 2
+BOOTSTRAP_RESAMPLES = 2000
 SAMPLE_EVERY = 10
 SPOT_CHECKS = 5
 DECODERS = {"oracle_sage": decode_object, "vilg": decode_vilg, "atom": decode_atom}
@@ -119,6 +127,14 @@ def buddy_pairs(sim):
     return sorted(pairs)
 
 
+def pair_cluster(seed, episode, sim, a, b):
+    """The identity of a buddy pair across the states it appears in: its seed, episode and
+    the two (static) request tables -- ids are renumbered on every delivery, tables never
+    change. Consecutive states of one pair are autocorrelated, so rates are reported per
+    distinct pair as well and bootstrapped over pairs."""
+    return (seed, episode, tuple(sorted((sim.passengers[a].requests, sim.passengers[b].requests))))
+
+
 def counterfactual_sim(sim, p, q):
     """A copy of `sim` with p's and q's request tables exchanged -- nothing else changes.
     facts() of the copy is the counterfactual in the simulator's own canonical order."""
@@ -129,7 +145,7 @@ def counterfactual_sim(sim, p, q):
     return cf
 
 
-def sample_states(seeds=SEEDS, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_EVERY, max_steps=2500, log=True):
+def sample_states(seeds, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_EVERY, max_steps=2500, log=True):
     """
     Plays ternary_corpus once (its convention only decides how it encodes; the trajectory
     and goals are the same for every convention) and records, per live state: its facts
@@ -154,6 +170,7 @@ def sample_states(seeds=SEEDS, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_E
                 "meta": {"time": sim.time, "timeout": sim.timeout, "planning": sim.planning},
                 "goals": [],
                 "waiting_pairs": [pair for pair in pairs if carried not in pair],
+                "waiting_clusters": [pair_cluster(seed, sample.episode, sim, *pair) for pair in pairs if carried not in pair],
                 "crossed": None,
             }
             crossed = [pair for pair in pairs if carried in pair]
@@ -165,7 +182,7 @@ def sample_states(seeds=SEEDS, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_E
                 _p, _q, flipped = build_flipped_facts(sim)
                 state["crossed"] = {
                     "p": p, "q": q,
-                    "pair_id": (seed, sample.episode, sim.passengers[p].requests, sim.passengers[q].requests),
+                    "pair_id": pair_cluster(seed, sample.episode, sim, p, q),
                     "cf_facts": facts_to_oracle_facts(cf_facts).astype(np.int32),
                     "dest": destination_via_join(facts, p),
                     "cf_dest": destination_via_join(cf_facts, p),
@@ -178,6 +195,23 @@ def sample_states(seeds=SEEDS, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_E
             print(f"  seed {seed}: {sum(1 for s in states if s['seed'] == seed)} live states ({time.time() - start:.0f}s)",
                   flush=True)
     return states
+
+
+def sample_until(min_distinct_pairs=MIN_DISTINCT_CROSSED_PAIRS, first_seed=FIRST_SEED, max_seeds=100,
+                 episodes=EPISODES_PER_SEED, sample_every=SAMPLE_EVERY, max_steps=2500, log=True):
+    """sample_states over seeds first_seed, first_seed + 1, ... -- whole seeds only -- until
+    the crossed live states contain at least `min_distinct_pairs` distinct buddy pairs.
+    :return: (states, seeds used)"""
+    states, seeds = [], []
+    for seed in range(first_seed, first_seed + max_seeds):
+        states.extend(sample_states([seed], episodes, sample_every, max_steps, log))
+        seeds.append(seed)
+        distinct = len({s["crossed"]["pair_id"] for s in states if s["crossed"] is not None})
+        if log:
+            print(f"    distinct crossed pairs so far: {distinct}", flush=True)
+        if distinct >= min_distinct_pairs:
+            break
+    return states, seeds
 
 
 def as_facts(array):
@@ -313,8 +347,8 @@ def buddies_metric(data, pairs, convention, level, vocab, frozen=False):
 def graph_items(state, convention, planner):
     """
     Yields the graph groups of one live state for one convention:
-      ("pair", key, data_a, data_b, p_a, p_b, dest_differs)   (M1/M2, crossed only)
-      ("single", key, data, waiting_pairs)                     (M3)
+      ("pair", goal, data_a, data_b, p_a, p_b, dest_differs, cluster)   (M1/M2, crossed only)
+      ("single", goal, data, waiting_pairs, clusters)                   (M3)
     key = (state index set by the caller, goal or None) -- enough to regenerate the graphs.
     """
     facts = as_facts(state["facts"])
@@ -325,21 +359,22 @@ def graph_items(state, convention, planner):
     if crossed is not None and crossed["nonisomorphic"] != "isomorphic":
         data_cf = encode(as_facts(crossed["cf_facts"]), state["meta"], convention)
         dest_differs = crossed["dest"] != crossed["cf_dest"]
-        yield ("pair", None, data, data_cf, crossed["p"], crossed["p"], dest_differs)
-    yield ("single", None, data, state["waiting_pairs"])
+        yield ("pair", None, data, data_cf, crossed["p"], crossed["p"], dest_differs, crossed["pair_id"])
+    yield ("single", None, data, state["waiting_pairs"], state["waiting_clusters"])
 
     for goal in state["goals"]:
         projection, _ = planner.plan(data, goal)
         if data_cf is not None and goal not in (crossed["p"], crossed["q"]):
             projection_cf, _ = planner.plan(data_cf, goal)
             p_new = passenger_after(crossed["p"], goal, passenger_ids)
-            yield ("pair", goal, projection, projection_cf, p_new, p_new, dest_differs)
-        kept = []
-        for a, b in state["waiting_pairs"]:
+            yield ("pair", goal, projection, projection_cf, p_new, p_new, dest_differs, crossed["pair_id"])
+        kept, kept_clusters = [], []
+        for (a, b), cluster in zip(state["waiting_pairs"], state["waiting_clusters"]):
             a_new, b_new = passenger_after(a, goal, passenger_ids), passenger_after(b, goal, passenger_ids)
             if a_new is not None and b_new is not None:
                 kept.append((a_new, b_new))
-        yield ("single", goal, projection, kept)
+                kept_clusters.append(cluster)
+        yield ("single", goal, projection, kept, kept_clusters)
 
 
 def measure(states, convention, frozen_vocabs, log=True):
@@ -357,7 +392,7 @@ def measure(states, convention, frozen_vocabs, log=True):
     for index, state in enumerate(states):
         for item in graph_items(state, convention, planner):
             if item[0] == "pair":
-                _kind, goal, data_a, data_b, p_a, p_b, dest_differs = item
+                _kind, goal, data_a, data_b, p_a, p_b, dest_differs, cluster = item
                 if convention == "oracle_sage":
                     object_identical[1] += 1
                     object_identical[0] += all(
@@ -368,9 +403,9 @@ def measure(states, convention, frozen_vocabs, log=True):
                 for level, vocab in frozen_vocabs.items():
                     results[("frozen", level)] = pair_metrics(data_a, data_b, p_a, p_b, convention, level, vocab, True)
                 pair_records.append({"state": index, "goal": goal, "p": p_a, "dest_differs": dest_differs,
-                                     "results": results})
+                                     "cluster": cluster, "results": results})
             else:
-                _kind, goal, data, pairs = item
+                _kind, goal, data, pairs, clusters = item
                 if not pairs:
                     continue
                 results = {}
@@ -378,41 +413,69 @@ def measure(states, convention, frozen_vocabs, log=True):
                     results[("growing", level)] = buddies_metric(data, pairs, convention, level, growing[level])
                 for level, vocab in frozen_vocabs.items():
                     results[("frozen", level)] = buddies_metric(data, pairs, convention, level, vocab, True)
-                single_records.append({"state": index, "goal": goal, "pairs": pairs, "results": results})
+                single_records.append({"state": index, "goal": goal, "pairs": pairs, "clusters": clusters,
+                                       "results": results})
         if log and (index + 1) % 500 == 0:
             print(f"  {convention}: {index + 1}/{len(states)} states ({time.time() - start:.0f}s)", flush=True)
     return {"pairs": pair_records, "singles": single_records, "object_identical": object_identical}
 
 
-def summarise(records, frozen_levels):
-    """Rates with counts, per (mode, L): M1, M2, M3, M4 (M1/M2 on dest-differs pairs), M5."""
+def cluster_bootstrap(values, rng, resamples=BOOTSTRAP_RESAMPLES):
+    """
+    95% percentile CI of a collision rate, resampling distinct buddy pairs (clusters) with
+    replacement -- every state/projection of a resampled pair comes with it, so the CI
+    reflects the number of distinct pairs, not of autocorrelated states.
+
+    :param values: list of (cluster, hit) -- one per observation
+    :return: [low, high] as fractions, or None with no observations
+    """
+    per_cluster = defaultdict(lambda: [0, 0])
+    for cluster, hit in values:
+        per_cluster[cluster][0] += bool(hit)
+        per_cluster[cluster][1] += 1
+    if not per_cluster:
+        return None
+    hits = np.array([v[0] for v in per_cluster.values()], dtype=np.float64)
+    counts = np.array([v[1] for v in per_cluster.values()], dtype=np.float64)
+    idx = rng.integers(0, len(hits), size=(resamples, len(hits)))
+    rates = hits[idx].sum(axis=1) / counts[idx].sum(axis=1)
+    return [float(np.percentile(rates, 2.5)), float(np.percentile(rates, 97.5))]
+
+
+def _cell(values, rng):
+    """[hits, n observations, n distinct pairs, CI] for a list of (cluster, hit)."""
+    return [sum(bool(h) for _c, h in values), len(values), len({c for c, _h in values}), cluster_bootstrap(values, rng)]
+
+
+def summarise(records, frozen_levels, seed=0):
+    """Rates per (mode, L): M1, M2, M3, M4 (M1/M2 on dest-differs pairs), M5 -- each cell
+    [hits, n observations, n distinct buddy pairs, bootstrap 95% CI over pairs]; *_live
+    restricts to live states (no projections)."""
+    rng = np.random.default_rng(seed)
     modes = [("growing", level) for level in GROWING_LEVELS] + [("frozen", level) for level in frozen_levels]
     out = {}
     pairs, singles = records["pairs"], records["singles"]
     for mode in modes:
-        m1 = sum(r["results"][mode][0] for r in pairs)
-        m2 = sum(r["results"][mode][1] for r in pairs)
-        relevant = [r for r in pairs if r["dest_differs"]]
-        m3_values = [v for r in singles for v in r["results"][mode]]
+        def m12(index, keep=lambda r: True):
+            return [(r["cluster"], r["results"][mode][index]) for r in pairs if keep(r)]
+
+        def m3(keep=lambda r: True):
+            return [(c, v[0]) for r in singles if keep(r) for c, v in zip(r["clusters"], r["results"][mode])]
+
+        live = lambda r: r["goal"] is None
+        relevant = lambda r: r["dest_differs"]
         row = {
-            "M1": [m1, len(pairs)], "M2": [m2, len(pairs)],
-            "M3": [sum(v[0] for v in m3_values), len(m3_values)],
-            "M4_M1": [sum(r["results"][mode][0] for r in relevant), len(relevant)],
-            "M4_M2": [sum(r["results"][mode][1] for r in relevant), len(relevant)],
-            "M1_live": [sum(r["results"][mode][0] for r in pairs if r["goal"] is None),
-                        sum(1 for r in pairs if r["goal"] is None)],
-            "M2_live": [sum(r["results"][mode][1] for r in pairs if r["goal"] is None),
-                        sum(1 for r in pairs if r["goal"] is None)],
-            "M3_live": [sum(v[0] for r in singles if r["goal"] is None for v in r["results"][mode]),
-                        sum(len(r["results"][mode]) for r in singles if r["goal"] is None)],
+            "M1": _cell(m12(0), rng), "M2": _cell(m12(1), rng), "M3": _cell(m3(), rng),
+            "M4_M1": _cell(m12(0, relevant), rng), "M4_M2": _cell(m12(1, relevant), rng),
+            "M1_live": _cell(m12(0, live), rng), "M2_live": _cell(m12(1, live), rng), "M3_live": _cell(m3(live), rng),
         }
         if mode[0] == "frozen":
             g = ("growing", mode[1])
-            row["M5_M1"] = [sum(r["results"][mode][0] and not r["results"][g][0] for r in pairs), len(pairs)]
-            row["M5_M2"] = [sum(r["results"][mode][1] and not r["results"][g][1] for r in pairs), len(pairs)]
-            row["M5_M3"] = [sum(f[0] and not gr[0] for r in singles for f, gr in zip(r["results"][mode], r["results"][g])),
-                            len(m3_values)]
-            row["pairs_with_oov"] = [sum(bool(r["results"][mode][2]) for r in pairs), len(pairs)]
+            row["M5_M1"] = _cell([(r["cluster"], r["results"][mode][0] and not r["results"][g][0]) for r in pairs], rng)
+            row["M5_M2"] = _cell([(r["cluster"], r["results"][mode][1] and not r["results"][g][1]) for r in pairs], rng)
+            row["M5_M3"] = _cell([(c, f[0] and not gr[0]) for r in singles
+                                  for c, f, gr in zip(r["clusters"], r["results"][mode], r["results"][g])], rng)
+            row["pairs_with_oov"] = _cell([(r["cluster"], r["results"][mode][2]) for r in pairs], rng)
         out[f"{mode[0]}_L{mode[1]}"] = row
     return out
 
@@ -594,16 +657,14 @@ def prototype_comparison(pairs, max_l=3):
         out["prototype"][convention] = {
             level: [int(round(rates[PROTOTYPE_NAMES[convention]][level] * n)), n] for level in range(1, max_l + 1)}
         for name, transform in (("production_without_taxi_in", drop_taxi_and_in), ("production", lambda f: f)):
-            counts = {}
-            for level in range(1, max_l + 1):
-                vocab = {}
-                hits = 0
-                for facts, cf_facts, _p, _id in pairs:
-                    data_a = encode(transform(facts), META_PLANNING, convention)
-                    data_b = encode(transform(cf_facts), META_PLANNING, convention)
-                    hits += pair_metrics(data_a, data_b, 0, 0, convention, level, vocab)[0]
-                counts[level] = [hits, n]
-            out[name][convention] = counts
+            vocabs = {level: {} for level in range(1, max_l + 1)}
+            hits = {level: 0 for level in range(1, max_l + 1)}
+            for facts, cf_facts, _p, _id in pairs:
+                data_a = encode(transform(facts), META_PLANNING, convention)
+                data_b = encode(transform(cf_facts), META_PLANNING, convention)
+                for level in vocabs:
+                    hits[level] += pair_metrics(data_a, data_b, 0, 0, convention, level, vocabs[level])[0]
+            out[name][convention] = {level: [hits[level], n] for level in vocabs}
     out["distinct_pairs"] = len({pair_id for _a, _b, _p, pair_id in pairs})
     return out
 
@@ -617,17 +678,26 @@ def frozen_vocab_paths(convention):
     return {level: str(build_wl_vocab.ternary_default_out_path(convention, level)) for level in FROZEN_LEVELS}
 
 
-def run(conventions=CONVENTIONS, seeds=SEEDS, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_EVERY,
-        max_steps=2500, use_frozen=True, spot_checks=SPOT_CHECKS, log=True, compare_prototype=True):
+def run(conventions=CONVENTIONS, seeds=None, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_EVERY,
+        max_steps=2500, use_frozen=True, spot_checks=SPOT_CHECKS, log=True, compare_prototype=True,
+        min_distinct_pairs=MIN_DISTINCT_CROSSED_PAIRS):
+    """seeds=None: sample_until(min_distinct_pairs) from FIRST_SEED; else exactly `seeds`."""
     t0 = time.time()
-    states = sample_states(seeds, episodes, sample_every, max_steps, log)
+    if seeds is None:
+        states, seeds = sample_until(min_distinct_pairs, episodes=episodes, sample_every=sample_every,
+                                     max_steps=max_steps, log=log)
+    else:
+        states = sample_states(seeds, episodes, sample_every, max_steps, log)
     sampling_seconds = time.time() - t0
     crossed = [s["crossed"] for s in states if s["crossed"] is not None]
     report = {
+        "seeds": list(seeds),
+        "episodes_per_seed": episodes,
         "states": len(states),
         "projections": sum(len(s["goals"]) for s in states),
         "crossed_live_states": len(crossed),
         "distinct_crossed_pairs": len({c["pair_id"] for c in crossed}),
+        "distinct_waiting_pairs": len({c for s in states for c in s["waiting_clusters"]}),
         "crossed_live_states_scripted_episodes": sum(
             1 for s in states if s["crossed"] is not None and s["episode"] < episodes // 2),
         "counterfactual": {
@@ -674,13 +744,24 @@ def run(conventions=CONVENTIONS, seeds=SEEDS, episodes=EPISODES_PER_SEED, sample
 
 
 def _rate(cell):
-    hits, n = cell
-    return f"{100.0 * hits / n:6.1f}% (n={n})" if n else "    -   (n=0)"
+    """[hits, n] or [hits, n, distinct pairs, CI]."""
+    hits, n = cell[0], cell[1]
+    if not n:
+        return "    -   (n=0)"
+    text = f"{100.0 * hits / n:5.1f}%"
+    if len(cell) > 2:
+        low, high = cell[3]
+        text += f" [{100 * low:.1f}, {100 * high:.1f}] (n={n}, pairs={cell[2]})"
+    else:
+        text += f" (n={n})"
+    return text
 
 
 def print_report(report):
-    print(f"\nstates: {report['states']} live + {report['projections']} projections; "
-          f"crossed live states: {report['crossed_live_states']}")
+    print(f"\nseeds {report['seeds'][0]}-{report['seeds'][-1]} ({len(report['seeds'])} x {report['episodes_per_seed']} "
+          f"episodes); states: {report['states']} live + {report['projections']} projections; crossed live states: "
+          f"{report['crossed_live_states']} ({report['distinct_crossed_pairs']} distinct pairs); distinct waiting "
+          f"pairs: {report['distinct_waiting_pairs']}")
     print(f"counterfactual: {report['counterfactual']}")
     for convention, r in report["conventions"].items():
         print(f"\n{convention}  (object identical tensors: {r['object_identical_tensors']})")
