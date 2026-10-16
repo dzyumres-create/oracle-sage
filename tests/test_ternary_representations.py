@@ -48,7 +48,8 @@ from analysis.indistinguishability import (
     wl_colours_per_level,
 )
 from analysis.ternary_collision_counter import build_flipped_facts, facts_to_ext_atoms
-from tests.test_ternary_world import crossed_state, legal_actions, scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import legal_actions, scripted_policy
+from tests.test_ternary_world import crossed_state
 
 
 PLANNING_META = {"time": 0, "timeout": 2000, "planning": True}

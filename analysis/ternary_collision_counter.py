@@ -11,7 +11,8 @@
        machinery and its generalised (arity-3) object/atom/object_atom encoders --
        "the counter's own encoders", per the task; the real production converters for
        this domain don't exist yet.
-     - tests/test_ternary_world.py's scripted_policy/instrument/crossed_state helpers
+     - the ternary scripted_policy (sage/domains/gym_taxi/simulator/ternary_scripted_policy.py,
+       moved there from tests/test_ternary_world.py) and that test file's crossed_state helper
        (Part 1's coverage sweep already established these produce real deliveries and
        real crossed states within a couple thousand steps, unlike pure random play).
 
@@ -68,7 +69,8 @@ from analysis.indistinguishability import (
 )
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import TernaryTaxiWorldSimulator
 from sage.domains.gym_taxi.utils.config import CITY_TERNARY
-from tests.test_ternary_world import scripted_policy, crossed_state
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import scripted_policy
+from tests.test_ternary_world import crossed_state
 
 
 def facts_to_ext_atoms(facts):
@@ -153,7 +155,7 @@ def approx_optimal_action_ternary(sim):
 def generate_states_from_real_sim(seeds=(0, 1, 2, 3, 4), sample_every=5, target_total=2000, random_prob=0.2, verbose=True):
     """
     Samples states from real TernaryTaxiWorldSimulator episodes, driven by
-    scripted_policy (imported from tests/test_ternary_world.py, unmodified) so
+    scripted_policy (ternary_scripted_policy.py, unmodified) so
     passengers actually get delivered and crossed states actually occur -- Part 1's
     coverage sweep already established pure random play doesn't (0 successful dropoffs
     across 3 seeds x 2000 steps).

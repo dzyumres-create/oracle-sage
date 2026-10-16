@@ -28,7 +28,7 @@ import torch_geometric
 # The test module installs the gym-0.26 randint shim and provides the setup reused here.
 from tests.test_oracle_decoder import build_model, sim_json
 from tests.test_ternary_planner import make_ternary_sim
-from tests.test_ternary_world import scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import scripted_policy
 from sage.domains.gym_taxi.utils.ternary_representations import (
     json_to_ternary_graph_object,
     json_to_ternary_graph_object_oracle,

@@ -45,7 +45,8 @@ from sage.domains.gym_taxi.utils.ternary_representations import (
 )
 from sage.domains.utils.wl_colours import wl_colours
 from tests.test_ternary_planner import make_ternary_sim
-from tests.test_ternary_world import crossed_state, scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import scripted_policy
+from tests.test_ternary_world import crossed_state
 
 CONVENTIONS = ("oracle_sage", "vilg", "atom")
 FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "fixtures", "wl_standard_ebbf25b.json.gz")

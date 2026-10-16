@@ -25,7 +25,8 @@ from analysis import ternary_collision_production as tcp
 from analysis.ternary_collision_counter import build_flipped_facts
 from sage.domains.gym_taxi.simulator.ternary_planner import plan_on_facts
 from tests.test_ternary_planner import make_ternary_sim
-from tests.test_ternary_world import crossed_state, scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import scripted_policy
+from tests.test_ternary_world import crossed_state
 from tests.test_wl_ternary import (
     CASE_C,
     CASE_C_FLIP,

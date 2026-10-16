@@ -23,7 +23,7 @@ import torch as th
 # test_ternary_planner installs the gym-0.26 randint shim at import time (needed by
 # PlanFeedback_A2C/make_vec_env below); importing its helpers here keeps one shim.
 from tests.test_ternary_planner import make_graph, make_ternary_sim, POLICY_KWARGS
-from tests.test_ternary_world import scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import scripted_policy
 
 from sage.agent.async_vec_env import AsyncVecEnv
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy

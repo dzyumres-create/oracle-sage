@@ -93,7 +93,8 @@ from sage.domains.gym_taxi.utils.ternary_representations import (
 )
 from sage.domains.utils import build_wl_vocab
 from sage.domains.utils.wl_colours import OOV_SIGNATURE, wl_colours
-from tests.test_ternary_world import crossed_state, destination_via_join, scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import destination_via_join, scripted_policy
+from tests.test_ternary_world import crossed_state
 
 CONVENTIONS = ("oracle_sage", "vilg", "atom")
 GROWING_LEVELS = (1, 2, 3)

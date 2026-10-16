@@ -162,6 +162,7 @@ from sage.domains.gym_taxi import REWARDS
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.representations import env_to_graph, env_to_vilg_graph, env_to_atom_graph
 from sage.domains.gym_taxi.simulator.planner import Planner
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import legal_actions, scripted_policy
 from sage.domains.utils.wl_colours import DOMAINS, OOV_SIGNATURE, freeze_vocab, wl_colours
 from sage.domains.gym_taxi.utils.wl_vocab_cache import metadata_from_payload, validate_wl_vocab_domain
 
@@ -519,9 +520,10 @@ TERNARY_SCENARIO = "city_ternary"
 # The settings of the standard domain's *_L1_full vocabs (their recorded build_procedure).
 TERNARY_DEFAULTS = {"episodes": 84, "sample_every": 10, "seed": 0, "eps": 0.2, "goals_per_state": 2}
 TERNARY_POLICY_MIX = (
-    "first half of episodes: tests.test_ternary_world.scripted_policy with random_prob=eps "
+    "first half of episodes: sage.domains.gym_taxi.simulator.ternary_scripted_policy.scripted_policy "
+    "with random_prob=eps "
     "(nearest waiting passenger, then its destination via the picked_up_at/request join); "
-    "second half: uniform random legal actions (tests.test_ternary_world.legal_actions)"
+    "second half: uniform random legal actions (ternary_scripted_policy.legal_actions)"
 )
 TERNARY_RNG = (
     "env.np_random = numpy RandomState(seed), assigned after construction (so the maze/spawn "
@@ -579,11 +581,6 @@ def ternary_corpus(
 
     :yield: TernarySample
     """
-    # Function-local: tests/ is importable from the repo root (PYTHONPATH=.), and this keeps
-    # the standard-domain code path free of the import. The ternary scripted policy lives
-    # there; the analysis scripts and tests use the same one.
-    from tests.test_ternary_world import legal_actions, scripted_policy
-
     env = ternary_env(graph_convention, seed, scenario)
     converter = env.observation_space.converter
     planner = env.observation_space.planner

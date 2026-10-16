@@ -64,7 +64,8 @@ from sage.agent.plan_feedback_a2c import PlanFeedback_A2C
 from sage.forks.stable_baselines3.stable_baselines3 import A2C
 from sage.domains.utils import spaces as sage_spaces
 from analysis.ternary_collision_counter import build_flipped_facts
-from tests.test_ternary_world import crossed_state, scripted_policy
+from sage.domains.gym_taxi.simulator.ternary_scripted_policy import scripted_policy
+from tests.test_ternary_world import crossed_state
 
 
 CONVENTIONS = ("oracle_sage", "vilg", "atom")
