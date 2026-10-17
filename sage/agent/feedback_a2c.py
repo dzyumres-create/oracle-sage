@@ -158,6 +158,11 @@ class Feedback_A2C(A2C):
         """
         if self.update_chunks > 1:
             return self._train_chunked()
+        # Peak GPU memory of this update, logged as train/max_mem_gb exactly as
+        # _train_chunked does (CUDA only; reading allocator statistics changes nothing).
+        use_cuda = self.device.type == "cuda"
+        if use_cuda:
+            th.cuda.reset_peak_memory_stats(self.device)
         # Update optimizer learning rate
         self._update_learning_rate(self.policy.optimizer)
 
@@ -229,6 +234,8 @@ class Feedback_A2C(A2C):
             logger.record("train/path_value_loss", path_value_loss.item())
         if hasattr(self.policy, "log_std"):
             logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+        if use_cuda:
+            logger.record("train/max_mem_gb", th.cuda.max_memory_allocated(self.device) / 2**30)
 
     def _log_grad_norms(self) -> None:
         """
