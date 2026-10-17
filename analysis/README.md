@@ -148,7 +148,11 @@ need to engineer a high crossing rate across many passengers to see the effect.
   into the simulator/env/planner and cannot be, without separate implementation work
   outside this analysis task.
 
-## Part 2: Ternary Generator Collision Counter Results
+## Part 2: Ternary Generator Collision Counter Results (PROTOTYPE encoders)
+
+> Prototype: `analysis/ternary_collision_counter.py`'s adapter drops the taxi and `in` facts and uses
+> `indistinguishability.py`'s re-implemented encoders, graph level only, growing vocab only. Superseded by
+> *Buddy-pair collisions with the production converters* below, which also explains every difference.
 
 ### 1. Counterfactual Collision Table (Real Crossed States vs. Flipped Counterfactuals)
 
@@ -196,15 +200,22 @@ L=2, 84-episode corpus (50,400 graphs):
 | vILG | 10,230 | 1.1 MB | 0.13% | 0.00% | **1.86%** |
 | atom | 526,374 | **115 MB** | **15.34%** | **27.43%** | **93.16%** |
 
-Held-out OOV against corpus size (same seed and mix, first 21 / 42 / 84 / 336 episodes),
-at the node type that fails:
+Held-out OOV against corpus size (same seed and mix; 21 / 42 / 84 / 336 / 650 episodes),
+at the node type that fails. The L=2 rows were measured on the first held-out set (seeds
+1001–1005, 10 episodes); the atom L=1 rows on the enlarged set (seeds 1001–1010, 20
+episodes), with 95% CIs from a bootstrap over held-out episodes:
 
-| vocab | nodes | 21 | 42 | 84 | 336 |
-|---|---|---|---|---|---|
-| object L=2 | passenger | 43.56% | 34.15% | 25.13% | — |
-| vILG L=2 | request | 7.54% | 2.95% | 1.86% | — |
-| atom L=1 | request | 8.61% | 4.44% | 2.53% | 1.02% |
-| (atom L=1 overall) | all | 0.54% | 0.26% | 0.16% | 0.07% |
+| vocab | nodes | 21 | 42 | 84 | 336 | 650 |
+|---|---|---|---|---|---|---|
+| object L=2 | passenger | 43.56% | 34.15% | 25.13% | — | — |
+| vILG L=2 | request | 7.54% | 2.95% | 1.86% | — | — |
+| atom L=1 | request | 7.87% [5.50, 10.24] | 4.15% [2.49, 5.98] | 2.39% [1.33, 3.59] | 1.01% [0.47, 1.72] | **0.69% [0.29, 1.23]** |
+| atom L=1 | all nodes | 0.48% | 0.25% | 0.16% | 0.07% | 0.04% |
+| atom L=1 | vocab size | 5,184 | 7,474 | 10,504 | 19,100 | 25,605 |
+
+(On the 10-episode set the atom L=1 request-atom OOV was 8.61 / 4.44 / 2.53 / 1.02% at
+21 / 42 / 84 / 336 episodes -- the same curve.) Atom L=1's request-atom OOV falls 1.9× and
+1.7× for the first two doublings of the corpus, then ~1.5× per doubling (84→336, 336→650).
 
 At L=2 a node's signature combines the L=1 classes of several neighbours (for an object
 passenger: four or five locations, each already encoding its degree and the facts at it),
@@ -213,13 +224,95 @@ per doubling of the corpus, and atom L=2 is both 93% OOV at request atoms and ov
 GitHub's 100 MB file limit. Frozen L=2 vocabs are therefore not built or committed; L=2
 (and L=3) appear below only as growing-vocab analysis.
 
-L=1, 336-episode corpus (201,600 graphs):
+**Committed L=1 vocabs** (`sage/domains/utils/wl_vocab_taxi_city_ternary_{conv}_L1.json`):
+650-episode corpus (390,000 graphs); held-out seeds 1001–1010 (20 episodes, 12,000 graphs,
+including late-episode states and projections); 95% CI over held-out episodes. Gate: < 1%
+overall and at passenger nodes, atom request atoms <= 1.5%.
 
 | convention | vocab size | file | OOV overall | passenger | request |
 |---|---|---|---|---|---|
-| object (oracle_sage) | 683 | 113 KB | 0.01% | 0.00% | 0.01% |
-| vILG | 420 | 67 KB | 0.00% | 0.00% | 0.00% |
-| atom | 19,100 | 4.3 MB | 0.07% | 0.00% | **1.02%** |
+| object (oracle_sage) | 885 | 149 KB | 0.003% [0.000, 0.008] | 0.000% | 0.003% [0.000, 0.008] |
+| vILG | 498 | 80 KB | 0.001% [0.000, 0.002] | 0.000% | 0.000% |
+| atom | 25,605 | 5.9 MB | 0.039% [0.014, 0.073] | 0.000% | 0.688% [0.288, 1.231] |
 
-Atom L=1's request-atom OOV is still falling (~1.6× per doubling between 84 and 336
-episodes), but reaches only 1.02% at 336 episodes.
+---
+
+## Buddy-pair collisions with the production converters
+
+`analysis/ternary_collision_production.py` (tests: `tests/test_ternary_collision_production.py`).
+States come from the vocab corpus design (`build_wl_vocab.ternary_corpus`) on seeds 2001–2007
+(whole seeds, added until the crossed states held ≥ 200 distinct buddy pairs): two full
+episodes per seed (scripted with 20% random actions, then uniform random), a live state every
+10 steps plus 2 planner projections per state — 2,800 live states and 5,600 projections.
+Every state is encoded by the policy-side converters (facts → JSON → `json_to_ternary_graph_*`)
+and projected by each convention's own `Planner(ternary=True)`; colours come from
+`wl_colours(domain="ternary")`. Buddy identity is read from the simulator (analysis only).
+
+- **Counterfactual** of a crossed state (carried p, buddy q waiting): the simulator's own
+  `facts()` with p's and q's request tables swapped. It equals the prototype's
+  `build_flipped_facts` as a fact set in 689/689 crossed live states (that function's list is
+  never in canonical order); all 689 are proven **not isomorphic** to the original by a
+  relational invariant independent of WL (road distances from p's true destination), and p's
+  true destination differs in all 689 — so M4 (the decision-relevant subset) is every pair.
+- **M1** graph level (critic / path_value_net): identical final-colour histograms, state vs
+  counterfactual, over live states and their projections that keep the pair (2,062
+  observations). **M2** node level (actor): the carried passenger's own colour identical in
+  both. **M3** two waiting buddies with the same colour within a state (62,506 observations).
+- One shared growing vocab per (convention, L), so equal colours mean WL-equivalent nodes.
+  n is given as observations / distinct buddy pairs; 95% CIs are a percentile bootstrap over
+  distinct pairs (2,000 resamples), since consecutive states of a pair are autocorrelated.
+- Checks: object encodings of state and counterfactual are identical tensors in 2,062/2,062
+  observations (so object M1 = M2 = 100% is structural); 290 random collisions and
+  non-collisions re-derived with the independent reference WL of `tests/test_wl_ternary.py`
+  all agree; the hand-built cases of `tests/test_wl_ternary.py` give the hand-derived answers
+  through this script.
+
+**Collision rates, growing vocab** (M1, M2: n = 2,062 observations / 204 distinct crossed
+pairs; M3: n = 62,506 observations / 310 distinct waiting pairs):
+
+| encoding | metric | L=1 | L=2 | L=3 |
+|---|---|---|---|---|
+| object | M1 graph | 100% | 100% | 100% |
+| object | M2 carried p | 100% | 100% | 100% |
+| object | M3 waiting buddies | 100% | 66.7% [58.9, 74.4] | 61.5% [53.0, 69.1] |
+| vILG | M1 graph | 100% | 20.6% [13.2, 29.8] | 2.9% [0.7, 6.0] |
+| vILG | M2 carried p | 100% | 100% | 20.6% [13.4, 30.1] |
+| vILG | M3 waiting buddies | 100% | 100% | 21.4% [15.1, 28.8] |
+| atom | M1 graph | 20.6% [13.3, 29.7] | 0% | 0% |
+| atom | M2 carried p | 100% | 20.6% [12.9, 30.1] | 2.9% [0.7, 5.9] |
+| atom | M3 waiting buddies | 100% | 20.5% [14.2, 27.2] | 1.8% [0.4, 4.2] |
+
+Live states only (689 / 204 pairs) differ from these by at most 0.7 points. The pattern is
+the one the hand-built cases predict: atom at L is vILG at L+1 (the proposition-node hop), and
+the node-level view lags the graph-level view by one L (the carried passenger only sees its
+own destination's distinguishing structure one hop later than the request node does).
+
+**Frozen vocab, L=1** (the committed 650-episode vocabs; same n):
+
+| encoding | M1 | M2 | M3 | M5 (frozen-only collisions, M1/M2/M3) | observations with an OOV node |
+|---|---|---|---|---|---|
+| object | 100% | 100% | 100% | 0 / 0 / 0 | 2.1% [0.5, 4.4] |
+| vILG | 100% | 100% | 100% | 0 / 0 / 0 | 1.2% [0.0, 3.0] |
+| atom | 20.6% [13.2, 29.8] | 100% | 100% | 0 / 0 / 0 | 28.4% [18.8, 39.3] |
+
+The frozen vocab adds no collision at L=1: identical to the growing vocab in every cell.
+
+**Differences from the prototype table, and their causes.** M1 on the same pairs three ways:
+
+| sample | encoders | vILG L=1/2/3 | atom L=1/2/3 |
+|---|---|---|---|
+| published sample (exact replay: 200 states, 40 distinct pairs) | prototype | 100 / 13.0 / 2.0% | 13.0 / 0 / 0% |
+| published sample | production, taxi and `in` dropped | 100 / 13.0 / 2.0% | 13.0 / 0 / 0% |
+| published sample | production | 100 / 12.5 / 2.0% | 12.5 / 0 / 0% |
+| this sample (689 live states, 204 pairs) | prototype | 100 / 21.0 / 2.9% | 21.0 / 0 / 0% |
+| this sample | production, taxi and `in` dropped | 100 / 21.0 / 2.9% | 21.0 / 0 / 0% |
+| this sample | production | 100 / 19.9 / 2.8% | 19.9 / 0 / 0% |
+
+(object: 100% at every L in every row.) So: (1) the prototype encoders and the production
+converters agree exactly once the taxi and `in` facts are dropped — no other encoder detail
+matters; (2) the taxi and `in` facts break about 1 in 100–200 collisions (13.0 → 12.5%,
+21.0 → 19.9%); (3) the remaining gap (13% vs ~20% for atom L=1 / vILG L=2) is the state
+sample: the published 200 states are 40 distinct pairs from scripted play only, and the
+bootstrap CI over this sample's 204 pairs is [13, 30]%, which the published 13% just touches.
+The prototype's qualitative conclusions stand: object is blind to the exchange at every L;
+atom separates every crossed pair at L=2 at graph level; vILG needs one L more.
