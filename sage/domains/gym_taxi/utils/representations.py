@@ -528,6 +528,11 @@ def atoms_to_json(atoms, global_feats):
     )
 
 
+# OOV-fraction log key prefix per domain (see attach_wl's `site`): the old domain keeps its
+# original "wl_atom/" keys; the ternary domain logs every convention under "wl/".
+WL_OOV_LOG_PREFIX = {"standard": "wl_atom/", "ternary": "wl/"}
+
+
 def attach_wl(data, graph_convention="atom", site=None, domain="standard"):
     """
     Attaches wl_colours ([N]) and wl_histogram ([1, V]) to a single, UNBATCHED
@@ -577,14 +582,18 @@ def attach_wl(data, graph_convention="atom", site=None, domain="standard"):
         both call sites this is used from
     :param site: if given, logs this call's OOV fraction under
         f"wl_atom/oov_fraction_{site}" (see above); None (default) logs nothing
-    :param domain: passed through to wl_colours() -- "standard" (the default) for both
-        current call sites
+    :param domain: passed through to get_wl_vocab() (which refuses a vocab configured for
+        another domain) and wl_colours() -- "standard" (the default) for the atom call
+        sites above; "ternary" for the ternary decoder (ternary_representations.
+        _ternary_json_to_data) and planner (ternary_planner.plan_ternary), all three
+        conventions, whose OOV fraction is logged as f"wl/oov_fraction_{site}"
+        (WL_OOV_LOG_PREFIX)
     :return: `data`, mutated in place (also returned so callers can chain e.g.
         `data.append(attach_wl(d))`)
     """
     if not is_wl_override_configured():
         return data
-    vocab = get_wl_vocab()
+    vocab = get_wl_vocab(domain)
     wl_colour_ids, wl_histogram = wl_colours(
         data.x, data.edge_index, data.edge_attr,
         num_iterations=get_wl_num_iterations(), vocab=vocab, frozen=True,
@@ -595,7 +604,7 @@ def attach_wl(data, graph_convention="atom", site=None, domain="standard"):
     if site is not None:
         oov_id = vocab[OOV_SIGNATURE]
         oov_fraction = (wl_colour_ids == oov_id).float().mean().item()
-        sb3_logger.record_mean(f"wl_atom/oov_fraction_{site}", oov_fraction)
+        sb3_logger.record_mean(f"{WL_OOV_LOG_PREFIX[domain]}oov_fraction_{site}", oov_fraction)
     return data
 
 

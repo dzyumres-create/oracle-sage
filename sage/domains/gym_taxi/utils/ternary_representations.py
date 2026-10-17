@@ -46,6 +46,7 @@ import torch as th
 from torch_geometric.data import Data, Batch
 
 from sage.domains.utils.representations import EMB_SIZE, json_default
+from sage.domains.gym_taxi.utils.representations import attach_wl
 
 
 # --- facts() contract (mirrors ternary_taxi_world.py's own FACT_PREDICATES/RELATION_PREDICATES) ---
@@ -595,7 +596,7 @@ def oracle_facts_to_facts(oracle_facts):
     return facts
 
 
-def _ternary_json_to_data(js, facts_to_graph_fn, attach_oracle_facts=False):
+def _ternary_json_to_data(js, facts_to_graph_fn, graph_convention, attach_oracle_facts=False):
     """
     Shared body for json_to_ternary_graph_object/_vilg/_atom: decodes one convention's
     worth of compact-facts JSON into a torch_geometric Batch, following
@@ -609,6 +610,10 @@ def _ternary_json_to_data(js, facts_to_graph_fn, attach_oracle_facts=False):
         calling convention as json_to_graph/json_to_atom_graph: each element indexable
         as `j[0]`)
     :param facts_to_graph_fn: facts_to_object_graph / facts_to_vilg_graph / facts_to_atom_graph
+    :param graph_convention: the convention facts_to_graph_fn encodes -- for attach_wl,
+        which adds wl_colours/wl_histogram (frozen, domain="ternary", OOV logged as
+        wl/oov_fraction_decoder) only when a WL vocab override is configured; with none,
+        it is a no-op and the Data is exactly what it was before WL existed here
     :param attach_oracle_facts: also attach the TRUE facts as oracle_facts (int64
         [n_facts, ORACLE_FACTS_WIDTH]) -- the oracle-decoder condition only. Read by
         the planner alone; no feature extractor, GNN or head reads it.
@@ -627,6 +632,7 @@ def _ternary_json_to_data(js, facts_to_graph_fn, attach_oracle_facts=False):
         d.global_features = th.as_tensor(global_feats, dtype=th.float32).unsqueeze(0)
         if attach_oracle_facts:
             d.oracle_facts = th.as_tensor(facts_to_oracle_facts(facts), dtype=th.long)
+        attach_wl(d, graph_convention=graph_convention, site="decoder", domain="ternary")
         data.append(d)
     return Batch.from_data_list(data)
 
@@ -634,27 +640,27 @@ def _ternary_json_to_data(js, facts_to_graph_fn, attach_oracle_facts=False):
 def json_to_ternary_graph_object(js):
     """Policy-side decoder for graph_convention="oracle_sage" on the ternary domain --
     see _ternary_json_to_data."""
-    return _ternary_json_to_data(js, facts_to_object_graph)
+    return _ternary_json_to_data(js, facts_to_object_graph, "oracle_sage")
 
 
 def json_to_ternary_graph_object_oracle(js):
     """Policy-side decoder for the oracle-decoder condition: exactly
     json_to_ternary_graph_object's Data (the GNN sees the object encoding as in Cell 1),
     plus the true facts as oracle_facts for the planner."""
-    return _ternary_json_to_data(js, facts_to_object_graph, attach_oracle_facts=True)
+    return _ternary_json_to_data(js, facts_to_object_graph, "oracle_sage", attach_oracle_facts=True)
 
 
 def json_to_ternary_graph_vilg(js):
     """Policy-side decoder for graph_convention="vilg" on the ternary domain -- see
     _ternary_json_to_data."""
-    return _ternary_json_to_data(js, facts_to_vilg_graph)
+    return _ternary_json_to_data(js, facts_to_vilg_graph, "vilg")
 
 
 def json_to_ternary_graph_atom(js):
     """Policy-side decoder for graph_convention="atom" on the ternary domain -- see
     _ternary_json_to_data. facts_to_atom_graph itself raises NotImplementedError for
     meta["planning"]=False; nothing here needs to special-case that."""
-    return _ternary_json_to_data(js, facts_to_atom_graph)
+    return _ternary_json_to_data(js, facts_to_atom_graph, "atom")
 
 
 # JsonGraph's converter (JSON string -> Batch) per ternary graph-construction convention --

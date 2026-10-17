@@ -37,6 +37,7 @@ import torch as th
 from torch_geometric.data import Data
 
 from sage.domains.gym_taxi.simulator.planner import increment_timer
+from sage.domains.gym_taxi.utils.representations import attach_wl
 from sage.domains.gym_taxi.utils.compat import data_keys
 from sage.domains.gym_taxi.utils.ternary_representations import (
     ATOM_MAX_ARITY,
@@ -773,4 +774,9 @@ def plan_ternary(graph, goal, graph_convention, oracle=False):
     facts = decode(graph)
     actions, projected_facts = plan_on_facts(facts, goal)
     projection = _reencode(projected_facts, encode, graph)
+    # WL colours of the projection (frozen, domain="ternary", OOV logged as
+    # wl/oov_fraction_planner) -- a no-op unless a WL vocab override is configured, so
+    # GNN runs get exactly the projection they always did. Never reads or changes
+    # anything the planning above used.
+    attach_wl(projection, graph_convention=graph_convention, site="planner", domain="ternary")
     return increment_timer(projection, actions)
