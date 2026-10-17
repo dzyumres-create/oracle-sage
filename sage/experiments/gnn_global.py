@@ -4,6 +4,7 @@ Run DQN on grid world.
 import sys
 import os
 import argparse
+import subprocess
 import torch as th
 
 import gym
@@ -25,7 +26,7 @@ from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy
 from sage.agent.tb_logging import TensorboardCallback
 from sage.agent.checkpoint_callback import PeriodicCheckpointCallback
 from sage.agent.async_vec_env import AsyncVecEnv
-from sage.domains.gym_taxi.utils.wl_vocab_cache import configure_wl_vocab_override, reset_wl_vocab_override
+from sage.domains.gym_taxi.utils.wl_vocab_cache import configure_wl_vocab_override, get_wl_vocab, reset_wl_vocab_override
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_DIAGNOSTIC_KEYS
 from sage.domains.gym_taxi.utils.compat import spec_kwargs
 
@@ -62,6 +63,75 @@ def oracle_decoder_dir(path):
     so it can never overwrite or mix with a Cell 1 run given the same flags
     (e.g. ./logs/cell1_seed0 -> ./logs/cell1_seed0_oracle_decoder, ./logs/ -> ./logs_oracle_decoder)."""
     return path.rstrip("/\\") + ORACLE_DECODER_SUFFIX
+
+def git_commit():
+    """HEAD of the checkout this file lives in, with "+dirty" if tracked files are modified;
+    "unknown" if git is unavailable. Logging only."""
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        head = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
+        dirty = subprocess.check_output(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
+                                        stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return "unknown"
+    return head + ("+dirty" if dirty else "")
+
+def configure_wl(args, policy_kwargs):
+    """
+    The WL part of a run's configuration. Without --wl-vocab-path: no WL override (GNN
+    policies). With it (and --wl-num-iterations, enforced at parse time), the WL vocab
+    override is configured and policy_kwargs gets wl_vocab_path / wl_num_iterations /
+    graph_convention, so env-side colouring and WLPlanFeedbackPolicy's own loader check
+    the SAME vocab against the SAME convention and L -- for the old domain exactly as
+    before.
+
+    A ternary env additionally:
+      - requires --planner --feedback, the only branch that selects WLPlanFeedbackPolicy
+        (anything else would silently train a GNN policy with WL colours attached);
+      - checks the vocab's recorded domain, convention and L against the env and flags
+        (configure_wl_vocab_override(..., domain="ternary") and the policy's own loader,
+        via policy_kwargs["wl_domain"]): a standard-domain vocab, another convention's
+        vocab, or another L refuses to start;
+      - returns the startup log line (convention, env id, L, vocab path, vocab size, git
+        commit). Old-domain runs return None and print nothing new.
+
+    :raises ValueError: on any of the ternary checks above
+    """
+    if args.wl_vocab_path is None:
+        reset_wl_vocab_override()
+        return None
+    policy_kwargs["wl_vocab_path"] = args.wl_vocab_path
+    # wl_num_iterations/graph_convention passed to the policy too - see
+    # WLPlanFeedbackPolicy.__init__ - so BOTH vocab-loading paths (this
+    # override, and the policy's own _load_vocab) validate against the
+    # SAME expected convention+L, from the SAME --wl-num-iterations/
+    # --graph-convention values, rather than two independently-derived
+    # checks that could silently drift apart.
+    policy_kwargs["wl_num_iterations"] = args.wl_num_iterations
+    policy_kwargs["graph_convention"] = args.graph_convention
+    if not is_ternary_env(args.env_name):
+        # Point env_to_graph/Planner.plan()'s WL colour computation at the SAME
+        # vocab+L WLPlanFeedbackPolicy is about to load - one source of truth,
+        # see wl_vocab_cache.py's module docstring. Must happen before run()
+        # constructs the env/policy below. graph_convention is passed through
+        # so a vocab whose recorded metadata doesn't match this run's actual
+        # convention (e.g. an oracle_sage vocab under --graph-convention atom)
+        # raises here, immediately, rather than producing silently-wrong
+        # colour ids once training starts.
+        configure_wl_vocab_override(args.wl_vocab_path, args.wl_num_iterations, graph_convention=args.graph_convention)
+        return None
+    if not (args.planner and args.feedback):
+        raise ValueError(
+            "a ternary WL run (--wl-vocab-path) needs --planner --feedback: only that branch "
+            "uses WLPlanFeedbackPolicy; without it the WL vocab would be loaded but unused"
+        )
+    policy_kwargs["wl_domain"] = "ternary"
+    configure_wl_vocab_override(args.wl_vocab_path, args.wl_num_iterations,
+                                graph_convention=args.graph_convention, domain="ternary")
+    vocab_size = len(get_wl_vocab("ternary"))
+    return (f"WL ternary run: convention={args.graph_convention} env={args.env_name} "
+            f"L={args.wl_num_iterations} vocab={args.wl_vocab_path} vocab_size={vocab_size} "
+            f"git_commit={git_commit()}")
 
 def run(variant):
 
@@ -398,27 +468,9 @@ def main(arglist):
         # policy_kwargs=dict(
         # ),
     )
-    if args.wl_vocab_path is not None:
-        variant["algorithm_kwargs"]["policy_kwargs"]["wl_vocab_path"] = args.wl_vocab_path
-        # wl_num_iterations/graph_convention passed to the policy too - see
-        # WLPlanFeedbackPolicy.__init__ - so BOTH vocab-loading paths (this
-        # override, and the policy's own _load_vocab) validate against the
-        # SAME expected convention+L, from the SAME --wl-num-iterations/
-        # --graph-convention values, rather than two independently-derived
-        # checks that could silently drift apart.
-        variant["algorithm_kwargs"]["policy_kwargs"]["wl_num_iterations"] = args.wl_num_iterations
-        variant["algorithm_kwargs"]["policy_kwargs"]["graph_convention"] = args.graph_convention
-        # Point env_to_graph/Planner.plan()'s WL colour computation at the SAME
-        # vocab+L WLPlanFeedbackPolicy is about to load - one source of truth,
-        # see wl_vocab_cache.py's module docstring. Must happen before run()
-        # constructs the env/policy below. graph_convention is passed through
-        # so a vocab whose recorded metadata doesn't match this run's actual
-        # convention (e.g. an oracle_sage vocab under --graph-convention atom)
-        # raises here, immediately, rather than producing silently-wrong
-        # colour ids once training starts.
-        configure_wl_vocab_override(args.wl_vocab_path, args.wl_num_iterations, graph_convention=args.graph_convention)
-    else:
-        reset_wl_vocab_override()
+    startup_line = configure_wl(args, variant["algorithm_kwargs"]["policy_kwargs"])
+    if startup_line is not None:
+        print(startup_line, flush=True)
     # Only passed when chunking is requested, so a default run builds exactly the same model
     if args.update_chunks != 1:
         variant["algorithm_kwargs"]["update_chunks"] = args.update_chunks
