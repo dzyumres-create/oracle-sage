@@ -526,8 +526,14 @@ class TestChunkedMemoryCuda(unittest.TestCase):
               f"torch.backends.cudnn.allow_tf32 = {getattr(th.backends.cudnn, 'allow_tf32', 'n/a')}")
         self.assertLess(peaks["N=4"], 0.5 * peaks["N=1"])
         self.assertLessEqual(rel, tolerance)
-        self.assertIn("train/max_mem_gb", results["N=4"]["logged"])
-        self.assertNotIn("train/max_mem_gb", results["N=1"]["logged"])
+        # Both the chunked and the non-chunked update log their peak (f96bb91). Each resets
+        # the peak counter when it starts and reads it when it ends; the peak measured here
+        # also spans run_update's setup, which allocates far less than the update itself,
+        # so the two agree up to rounding (1 MiB).
+        for run in results:
+            self.assertIn("train/max_mem_gb", results[run]["logged"], run)
+            self.assertAlmostEqual(results[run]["logged"]["train/max_mem_gb"], peaks[run] / 2**30,
+                                   delta=2**-10, msg=run)
 
 
 # ==========================================================================================
