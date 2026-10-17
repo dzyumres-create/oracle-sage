@@ -16,6 +16,12 @@ replay mode: goals are read back from a record file, so both runs execute the sa
 The harness file itself can live anywhere; only PYTHONPATH selects the code under test.
 See docs/cell4_L1.md for the exact commands used.
 
+--ternary drives GraphTaxiEnv(scenario="city_ternary", ternary=True) instead (same
+convention flag; json_built counts the ternary simulator's observation_fn calls). With
+--vocab, the WL override is configured for the ternary domain and that convention.
+wl_vocab_cache is imported only when --vocab is given, so the harness also runs against
+code versions that predate it (e.g. ternary-gnn e84fb5d).
+
 usage: PYTHONPATH=<worktree> python docs/tools/policy_input_harness.py --convention vilg \
            --vocab P --L 2 --mode record --out REF.json
        PYTHONPATH=<worktree> python docs/tools/policy_input_harness.py ... \
@@ -47,7 +53,6 @@ import sage.domains.gym_taxi  # noqa: F401
 from sage.domains.gym_taxi import REWARDS
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 import sage.domains.gym_taxi.simulator.taxi_world as TW
-from sage.domains.gym_taxi.utils import wl_vocab_cache
 from sage.agent.async_vec_env import AsyncVecEnv
 from sage.forks.stable_baselines3.stable_baselines3.common.monitor import Monitor
 
@@ -82,24 +87,39 @@ def main():
     p.add_argument("--goals", default=None)
     p.add_argument("--no-obs-mask", action="store_true", help="never pass obs_mask (control run)")
     p.add_argument("--out", required=True)
+    p.add_argument("--ternary", action="store_true", help="the ternary domain (city_ternary)")
     a = p.parse_args()
 
     if a.vocab is not None:
-        wl_vocab_cache.configure_wl_vocab_override(a.vocab, a.L)
-    else:
-        wl_vocab_cache.reset_wl_vocab_override()
+        from sage.domains.gym_taxi.utils import wl_vocab_cache
+        if a.ternary:
+            wl_vocab_cache.configure_wl_vocab_override(a.vocab, a.L, graph_convention=a.convention, domain="ternary")
+        else:
+            wl_vocab_cache.configure_wl_vocab_override(a.vocab, a.L)
 
     n_built = [0]
-    _orig_get = TW.TaxiWorldSimulator._get_state_json
-    def _counted(self):
-        n_built[0] += 1
-        return _orig_get(self)
-    TW.TaxiWorldSimulator._get_state_json = _counted
+    if a.ternary:
+        import sage.domains.gym_taxi.envs.taxi_env as TE
+        _orig_obs = TE._ternary_observation_fn
+        def _counted_obs(sim):
+            n_built[0] += 1
+            return _orig_obs(sim)
+        TE._ternary_observation_fn = _counted_obs
+    else:
+        _orig_get = TW.TaxiWorldSimulator._get_state_json
+        def _counted(self):
+            n_built[0] += 1
+            return _orig_get(self)
+        TW.TaxiWorldSimulator._get_state_json = _counted
 
     def make(seed):
         def _f():
-            env = GraphTaxiEnv("graph", "city", mask=False, rewards=REWARDS["v1"].copy(),
-                               graph_convention=a.convention)
+            if a.ternary:
+                env = GraphTaxiEnv("graph", "city_ternary", mask=False, rewards=REWARDS["v1"].copy(),
+                                   graph_convention=a.convention, ternary=True)
+            else:
+                env = GraphTaxiEnv("graph", "city", mask=False, rewards=REWARDS["v1"].copy(),
+                                   graph_convention=a.convention)
             env.seed(seed)
             env.action_space.seed(seed)
             return Monitor(env, None, info_keywords=("len100", "len200"))
