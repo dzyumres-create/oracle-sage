@@ -377,14 +377,15 @@ def graph_items(state, convention, planner):
         yield ("single", goal, projection, kept, kept_clusters)
 
 
-def measure(states, convention, frozen_vocabs, log=True):
+def measure(states, convention, frozen_vocabs, log=True, growing_levels=GROWING_LEVELS):
     """
     :param frozen_vocabs: {L: vocab} (may be empty)
+    :param growing_levels: the L values coloured with a shared growing vocab
     :return: records: {"pairs": [...], "singles": [...]} where each pair record holds
         per-mode results {(mode, L): (m1, m2, oov)} and each single record per-pair
         results {(mode, L): [(m3, oov), ...]}
     """
-    growing = {level: {} for level in GROWING_LEVELS}
+    growing = {level: {} for level in growing_levels}
     planner = Planner(graph_convention=convention, ternary=True)
     pair_records, single_records = [], []
     object_identical = [0, 0]
@@ -398,7 +399,7 @@ def measure(states, convention, frozen_vocabs, log=True):
                     object_identical[0] += all(
                         th.equal(getattr(data_a, n), getattr(data_b, n)) for n in ("x", "edge_index", "edge_attr"))
                 results = {}
-                for level in GROWING_LEVELS:
+                for level in growing_levels:
                     results[("growing", level)] = pair_metrics(data_a, data_b, p_a, p_b, convention, level, growing[level])
                 for level, vocab in frozen_vocabs.items():
                     results[("frozen", level)] = pair_metrics(data_a, data_b, p_a, p_b, convention, level, vocab, True)
@@ -409,7 +410,7 @@ def measure(states, convention, frozen_vocabs, log=True):
                 if not pairs:
                     continue
                 results = {}
-                for level in GROWING_LEVELS:
+                for level in growing_levels:
                     results[("growing", level)] = buddies_metric(data, pairs, convention, level, growing[level])
                 for level, vocab in frozen_vocabs.items():
                     results[("frozen", level)] = buddies_metric(data, pairs, convention, level, vocab, True)
@@ -417,7 +418,8 @@ def measure(states, convention, frozen_vocabs, log=True):
                                        "results": results})
         if log and (index + 1) % 500 == 0:
             print(f"  {convention}: {index + 1}/{len(states)} states ({time.time() - start:.0f}s)", flush=True)
-    return {"pairs": pair_records, "singles": single_records, "object_identical": object_identical}
+    return {"pairs": pair_records, "singles": single_records, "object_identical": object_identical,
+            "growing_levels": tuple(growing_levels)}
 
 
 def cluster_bootstrap(values, rng, resamples=BOOTSTRAP_RESAMPLES):
@@ -452,7 +454,7 @@ def summarise(records, frozen_levels, seed=0):
     [hits, n observations, n distinct buddy pairs, bootstrap 95% CI over pairs]; *_live
     restricts to live states (no projections)."""
     rng = np.random.default_rng(seed)
-    modes = [("growing", level) for level in GROWING_LEVELS] + [("frozen", level) for level in frozen_levels]
+    modes = [("growing", level) for level in records["growing_levels"]] + [("frozen", level) for level in frozen_levels]
     out = {}
     pairs, singles = records["pairs"], records["singles"]
     for mode in modes:
@@ -522,7 +524,7 @@ def spot_check(states, records, convention, frozen_levels, rng, planner, n=SPOT_
     re-derived with the reference WL. Returns {cell: [checked, agreed]} and a list of
     disagreements (must be empty)."""
     summary, disagreements = defaultdict(lambda: [0, 0]), []
-    modes = [("growing", level) for level in GROWING_LEVELS] + [("frozen", level) for level in frozen_levels]
+    modes = [("growing", level) for level in records["growing_levels"]] + [("frozen", level) for level in frozen_levels]
 
     def regenerate(record):
         state = states[record["state"]]
@@ -680,7 +682,7 @@ def frozen_vocab_paths(convention):
 
 def run(conventions=CONVENTIONS, seeds=None, episodes=EPISODES_PER_SEED, sample_every=SAMPLE_EVERY,
         max_steps=2500, use_frozen=True, spot_checks=SPOT_CHECKS, log=True, compare_prototype=True,
-        min_distinct_pairs=MIN_DISTINCT_CROSSED_PAIRS):
+        min_distinct_pairs=MIN_DISTINCT_CROSSED_PAIRS, growing_levels=GROWING_LEVELS):
     """seeds=None: sample_until(min_distinct_pairs) from FIRST_SEED; else exactly `seeds`."""
     t0 = time.time()
     if seeds is None:
@@ -716,7 +718,7 @@ def run(conventions=CONVENTIONS, seeds=None, episodes=EPISODES_PER_SEED, sample_
         if use_frozen:
             frozen = {level: _load_vocab(path, convention, level, "ternary")
                       for level, path in frozen_vocab_paths(convention).items()}
-        records = measure(states, convention, frozen, log)
+        records = measure(states, convention, frozen, log, growing_levels)
         summary = summarise(records, sorted(frozen))
         checks, disagreements = spot_check(states, records, convention, sorted(frozen), rng,
                                            Planner(graph_convention=convention, ternary=True), spot_checks)
@@ -784,8 +786,11 @@ def main():
     parser.add_argument("--out", default=None)
     parser.add_argument("--conventions", nargs="+", default=list(CONVENTIONS))
     parser.add_argument("--no-frozen", action="store_true", help="growing vocab only (no Part 3 vocab files needed)")
+    parser.add_argument("--no-prototype", action="store_true", help="skip the prototype comparison")
+    parser.add_argument("--growing-levels", type=int, nargs="+", default=list(GROWING_LEVELS))
     args = parser.parse_args()
-    report = run(conventions=args.conventions, use_frozen=not args.no_frozen)
+    report = run(conventions=args.conventions, use_frozen=not args.no_frozen, compare_prototype=not args.no_prototype,
+                 growing_levels=tuple(args.growing_levels))
     print_report(report)
     if args.out:
         with open(args.out, "w") as f:
