@@ -65,6 +65,10 @@ class Feedback_A2C(A2C):
     :param _init_setup_model: Whether or not to build the network at the creation of the instance
     """
 
+    # --diag-occupancy diagnostics (PlanFeedback_A2C sets an instance attribute when enabled);
+    # train() hands them its pre-clip gradient norms. Logging only.
+    diag = None
+
     def __init__(
         self,
         policy: Union[str, Type[ActorCriticPolicy]],
@@ -206,11 +210,17 @@ class Feedback_A2C(A2C):
                 path_value_loss = F.mse_loss(rollout_data.returns, path_values)
                 loss = self.policy_coef*policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + self.pvf_coef * path_value_loss
 
+            if self.diag is not None and self.diag.wants_loss_grads(self._n_updates):
+                self.diag.on_loss_grads(self._loss_term_grads(
+                    policy_loss, entropy_loss, value_loss, path_value_loss if self.pvf_coef != 0 else None))
+
             # Optimization step
             self.policy.optimizer.zero_grad()
             loss.backward()
             if self.log_grad_norms:
                 self._log_grad_norms()
+            if self.diag is not None:
+                self.diag.on_grad_norms(self._grad_norms())
 
             # Clip grad norm
             th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
@@ -245,17 +255,66 @@ class Feedback_A2C(A2C):
           train/clip_coef        the factor it scales gradients by: min(1, max_norm / (total + 1e-6)),
                                  torch's own formula
         """
+        norms = self._grad_norms()
+        for key in ("grad_norm_head", "grad_norm_train", "grad_norm_total", "clip_coef"):
+            logger.record("train/" + key, norms[key])
+
+    def _grad_norms(self) -> Dict[str, float]:
+        """
+        The gradient norms going into clip_grad_norm_ (see _log_grad_norms), plus
+        grad_norm_frozen: the norm over every policy parameter the optimizer does not update
+        (path_value_net; also gnn_extractor2 without --shared-gnn), whose gradients are never
+        zeroed. Reads .grad, changes nothing.
+        """
         def norm(params):
             norms = [p.grad.detach().norm(2) for p in params if p.grad is not None]
             return th.norm(th.stack(norms), 2).item() if norms else 0.0
 
+        in_optimizer = {id(p) for group in self.policy.optimizer.param_groups for p in group["params"]}
         head = norm(self.policy.path_value_net.parameters()) if hasattr(self.policy, "path_value_net") else 0.0
         trained = norm(p for group in self.policy.optimizer.param_groups for p in group["params"])
+        frozen = norm(p for p in self.policy.parameters() if id(p) not in in_optimizer)
         total = norm(self.policy.parameters())
-        logger.record("train/grad_norm_head", head)
-        logger.record("train/grad_norm_train", trained)
-        logger.record("train/grad_norm_total", total)
-        logger.record("train/clip_coef", min(1.0, self.max_grad_norm / (total + 1e-6)))
+        return {
+            "grad_norm_head": head,
+            "grad_norm_train": trained,
+            "grad_norm_frozen": frozen,
+            "grad_norm_total": total,
+            "clip_coef": min(1.0, self.max_grad_norm / (total + 1e-6)),
+        }
+
+    def _loss_term_grads(self, policy_loss, entropy_loss, value_loss, path_value_loss, weight=1.0) -> Dict[str, Optional[th.Tensor]]:
+        """
+        --diag-occupancy (logging only): each loss term's gradient, times its training
+        coefficient (and the chunk weight), w.r.t. the shared GNN -- the gnn_extractor and
+        features_extractor parameters -- as one flat vector per term ("pol", "ent", "val",
+        "pv"; None when pvf_coef is 0). th.autograd.grad returns new tensors and never writes
+        .grad; retain_graph=True leaves the graph for the update's own backward. No RNG.
+        """
+        params, seen = [], set()
+        for module in (self.policy.gnn_extractor, self.policy.features_extractor):
+            for p in module.parameters():
+                if id(p) not in seen:
+                    seen.add(id(p))
+                    params.append(p)
+        terms = {
+            "pol": self.policy_coef * policy_loss,
+            "ent": self.ent_coef * entropy_loss,
+            "val": self.vf_coef * value_loss,
+            "pv": None if path_value_loss is None else self.pvf_coef * path_value_loss,
+        }
+        out = {}
+        for name, term in terms.items():
+            if term is None:
+                out[name] = None
+                continue
+            if term.requires_grad:
+                grads = th.autograd.grad(weight * term, params, retain_graph=True, allow_unused=True)
+            else:
+                grads = [None] * len(params)
+            out[name] = th.cat([(th.zeros_like(p) if g is None else g).detach().reshape(-1)
+                                for p, g in zip(params, grads)])
+        return out
 
     def _train_chunked(self) -> None:
         """
@@ -295,6 +354,9 @@ class Feedback_A2C(A2C):
 
         batch_size = actions.shape[0]
         totals = {"policy_loss": 0.0, "value_loss": 0.0, "entropy_loss": 0.0, "entropy": 0.0, "path_value_loss": 0.0}
+
+        loss_grads = self.diag is not None and self.diag.wants_loss_grads(self._n_updates)
+        term_grads = None
 
         self.policy.optimizer.zero_grad()
         for chunk in np.array_split(np.arange(batch_size), self.update_chunks):
@@ -336,6 +398,12 @@ class Feedback_A2C(A2C):
                 loss = self.policy_coef*policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + self.pvf_coef * path_value_loss
                 totals["path_value_loss"] += weight * path_value_loss.item()
 
+            if loss_grads:
+                chunk_grads = self._loss_term_grads(
+                    policy_loss, entropy_loss, value_loss, path_value_loss if self.pvf_coef != 0 else None, weight=weight)
+                term_grads = chunk_grads if term_grads is None else {
+                    name: None if g is None else g + chunk_grads[name] for name, g in term_grads.items()}
+
             # Accumulate this chunk's share of the full-batch gradient
             (weight * loss).backward()
 
@@ -344,8 +412,12 @@ class Feedback_A2C(A2C):
             totals["entropy_loss"] += weight * entropy_loss.item()
             totals["entropy"] += weight * entropy.item()
 
+        if loss_grads:
+            self.diag.on_loss_grads(term_grads)
         if self.log_grad_norms:
             self._log_grad_norms()
+        if self.diag is not None:
+            self.diag.on_grad_norms(self._grad_norms())
 
         # Clip grad norm on the full accumulated gradient, then a single step
         th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
