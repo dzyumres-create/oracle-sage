@@ -5,3 +5,6 @@ __pycache__/
 Miniconda3-latest-MacOSX-arm64.sh
 *.zip
 trained_models/
+
+# --diag-occupancy output
+chart_logs/
