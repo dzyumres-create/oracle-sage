@@ -17,7 +17,7 @@ from ast import literal_eval as make_tuple
 from gym import error, spaces, utils
 from gym.utils import seeding
 from sage.domains.gym_taxi.simulator.taxi_world import TaxiWorldSimulator, ACTIONS, TaxiWorldSimulatorImage
-from sage.domains.gym_taxi.simulator.ternary_taxi_world import TernaryTaxiWorldSimulator
+from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_EMPTY, TernaryTaxiWorldSimulator
 from sage.domains.gym_taxi.simulator.planner import Planner
 from sage.domains.utils.spaces import JsonGraph
 from sage.domains.gym_taxi.utils.spaces import Json
@@ -151,6 +151,17 @@ DIRECTIONS = {
     (-1, 0): "move-left",
     (1, 0): "move-right",
 }
+
+
+# --diag-occupancy (logging only): ground-truth fields GraphTaxiEnv.step adds to info on the
+# ternary domain, read from the simulator around each step. Never present with the flag off.
+DIAG_OCCUPIED = "diag_occupied"        # 1 if the taxi carries a passenger after this step
+DIAG_CARRIED_PID = "diag_carried_pid"  # the carried passenger's id after this step, or -1
+DIAG_TAXI_LOC = "diag_taxi_loc"        # the taxi's location after this step
+DIAG_DROPOFF = "diag_dropoff"          # none / success / fail_own / fail_nondest / fail_empty
+DIAG_DROPOFF_PID = "diag_dropoff_pid"  # the passenger a dropoff was attempted for (id at that moment), or -1
+DIAG_PICKUP = "diag_pickup"            # none / success / fail
+DIAG_INFO_KEYS = (DIAG_OCCUPIED, DIAG_CARRIED_PID, DIAG_TAXI_LOC, DIAG_DROPOFF, DIAG_DROPOFF_PID, DIAG_PICKUP)
 
 
 def _decode(i):
@@ -582,7 +593,7 @@ class JsonTaxiEnv(BaseTaxiEnv):
 
 class GraphTaxiEnv(BaseTaxiEnv):
     def __init__(self, representation, scenario, mask=False, rewards=None, graph_convention="oracle_sage", ternary=False,
-                 oracle_decoder=False):
+                 oracle_decoder=False, diag_occupancy=False):
         # `ternary` selects the ternary-predicate domain (TernaryTaxiWorldSimulator,
         # TERNARY_GRAPH_CONVENTIONS/TERNARY_GRAPH_CONVENTION_CONVERTERS/TERNARY_JSON_WIDTH)
         # instead of the old domain's own dicts, which are never re-keyed or edited --
@@ -604,6 +615,11 @@ class GraphTaxiEnv(BaseTaxiEnv):
                 f"got ternary={ternary!r}, graph_convention={graph_convention!r}"
             )
         self.oracle_decoder = oracle_decoder
+        # --diag-occupancy: add the DIAG_INFO_KEYS ground-truth fields to every step's info.
+        # Logging only -- reads the simulator, draws nothing, changes no state.
+        if diag_occupancy and not ternary:
+            raise ValueError("diag_occupancy=True requires ternary=True")
+        self.diag_occupancy = diag_occupancy
         self.rewards = rewards
         self.scenario = SCENARIOS[scenario]
         self.mask=mask
@@ -665,11 +681,48 @@ class GraphTaxiEnv(BaseTaxiEnv):
             )
 
     def step(self, action):
+        if self.diag_occupancy:
+            before = self._diag_before_step(action)
         obs, reward, done, info = self._step(action)
         self._check_json_length(obs)
         info['s_true'] = obs
         info['d_true'] = done
+        if self.diag_occupancy:
+            info.update(self._diag_after_step(*before))
         return obs, reward, done, info
+
+    def _diag_before_step(self, action):
+        """--diag-occupancy: what the dropoff/pickup bookkeeping looks like before this step.
+        The simulator is only rebuilt by reset(), so it is the same object after the step."""
+        sim = self.sim
+        is_pickup = action != sim.taxi.node and action in sim.passengers
+        return len(sim.dropoff_records), sim.dropoff_counts[DROPOFF_EMPTY], action if is_pickup else None
+
+    def _diag_after_step(self, n_records, n_empty, pickup_pid):
+        """--diag-occupancy: this step's ground truth, from the simulator (never the graph).
+        A dropoff with a passenger aboard appends one DropoffRecord, an empty one only bumps
+        dropoff_counts[DROPOFF_EMPTY] -- see TernaryTaxiWorldSimulator._attempt_dropoff."""
+        sim = self.sim
+        dropoff, dropoff_pid = "none", -1
+        if len(sim.dropoff_records) > n_records:
+            record = sim.dropoff_records[-1]
+            dropoff = "success" if record.success else ("fail_own" if record.own_other_dest else "fail_nondest")
+            dropoff_pid = int(record.pid)
+        elif sim.dropoff_counts[DROPOFF_EMPTY] > n_empty:
+            dropoff = "fail_empty"
+        pickup = "none"
+        if pickup_pid is not None:
+            # a pickup never renumbers passengers, so the id still names the same passenger
+            pickup = "success" if sim.taxi.passenger == pickup_pid else "fail"
+        carried = sim.taxi.passenger
+        return {
+            DIAG_OCCUPIED: int(carried is not None),
+            DIAG_CARRIED_PID: -1 if carried is None else int(carried),
+            DIAG_TAXI_LOC: int(sim.taxi.location),
+            DIAG_DROPOFF: dropoff,
+            DIAG_DROPOFF_PID: dropoff_pid,
+            DIAG_PICKUP: pickup,
+        }
 
     def reset(self):
         obs = super().reset()
