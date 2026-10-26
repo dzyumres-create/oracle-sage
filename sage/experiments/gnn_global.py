@@ -31,6 +31,27 @@ from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_DIAGNOSTI
 from sage.domains.gym_taxi.utils.compat import spec_kwargs
 
 ORACLE_DECODER_SUFFIX = "_oracle_decoder"
+DIAG_OUT_DIR = os.path.join("chart_logs", "diag")
+DIAG_LOSS_GRAD_EVERY = 5  # --diag-occupancy's per-loss-term gradients: every 5th update
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def git_provenance():
+    """(commit hash, dirty) of the checkout this file lives in; ("unknown", "unknown") when git or
+    the repository is unavailable. Dirty means tracked files differ from HEAD (untracked files,
+    e.g. logs, don't count)."""
+    try:
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+                                         stderr=subprocess.DEVNULL, timeout=30).decode().strip()
+        status = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO_ROOT,
+                                         stderr=subprocess.DEVNULL, timeout=30).decode()
+        return commit, bool(status.strip())
+    except (OSError, subprocess.SubprocessError):
+        return "unknown", "unknown"
+
+def startup_line(arglist):
+    """Logging only: the run's full command line and code version, printed before anything else."""
+    commit, dirty = git_provenance()
+    return f"startup: argv={sys.argv!r} main_args={list(arglist)!r} commit={commit} dirty={dirty}"
 
 def is_ternary_env(env_name):
     """Ternary-ness comes from the registered spec's own kwargs, read through
@@ -57,6 +78,19 @@ def validate_oracle_decoder(env_name, graph_convention):
             f"--oracle-decoder requires a ternary env and --graph-convention oracle_sage; "
             f"got --env-name {env_name!r}, --graph-convention {graph_convention!r}"
         )
+
+def validate_diag_occupancy(env_name, feedback, planner):
+    """--diag-occupancy reads the ternary simulator's ground truth and hooks
+    PlanFeedback_A2C.collect_rollouts, so it needs a ternary env, --feedback and --planner."""
+    if not is_ternary_env(env_name) or not (feedback and planner):
+        raise ValueError(
+            f"--diag-occupancy requires a ternary env, --feedback and --planner; got --env-name {env_name!r}, "
+            f"--feedback {feedback}, --planner {planner}"
+        )
+
+def diag_run_name(log_dir, seed):
+    """<run> in chart_logs/diag/<run>_*.csv: the log directory's name plus the seed."""
+    return f"{os.path.basename(os.path.normpath(log_dir))}_s{seed}"
 
 def oracle_decoder_dir(path):
     """save_dir/log_dir for an --oracle-decoder run: the given path with a fixed suffix,
@@ -146,6 +180,8 @@ def run(variant):
         env_kwargs["graph_convention"] = variant["graph_convention"]
     if variant.get("oracle_decoder", False):
         env_kwargs["oracle_decoder"] = True
+    if variant.get("diag_occupancy", False):
+        env_kwargs["diag_occupancy"] = True
 
     if variant["planner"]:
         env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv,env_kwargs=env_kwargs)
@@ -208,6 +244,14 @@ def main(arglist):
         help="log the gradient norms going into each update's gradient clipping "
              "(train/grad_norm_head, grad_norm_train, grad_norm_total, clip_coef). Logging only; "
              "does not change training. Requires --feedback.",
+    )
+    parser.add_argument(
+        "--diag-occupancy",
+        action="store_true",
+        default=False,
+        help="logging-only per-decision/per-update diagnostics split by taxi occupancy, written to "
+             "chart_logs/diag/<log-dir name>_s<seed>_{decisions,bootstrap,updates}.csv plus diag/* in the "
+             "printed log. Ternary env with --feedback --planner only; does not change training.",
     )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
@@ -398,6 +442,7 @@ def main(arglist):
         "--lr-decay", action="store_true", default=False, help="decay lr by a factor of 10 over the first half of training"
     )
 
+    print(startup_line(arglist), flush=True)
     args = parser.parse_args(arglist)
     if (args.wl_vocab_path is None) != (args.wl_num_iterations is None):
         parser.error(
@@ -415,6 +460,8 @@ def main(arglist):
     if args.log_grad_norms and not args.feedback:
         raise ValueError("--log-grad-norms is only implemented for the feedback algorithms (Feedback_A2C / "
                          "PlanFeedback_A2C); pass --feedback")
+    if args.diag_occupancy:
+        validate_diag_occupancy(args.env_name, args.feedback, args.planner)
     if args.oracle_decoder:
         validate_oracle_decoder(args.env_name, args.graph_convention)
         args.save_dir = oracle_decoder_dir(args.save_dir)
@@ -432,6 +479,7 @@ def main(arglist):
         env_name=args.env_name,
         graph_convention=args.graph_convention,
         oracle_decoder=args.oracle_decoder,
+        diag_occupancy=args.diag_occupancy,
         seed=args.seed,
         num_env_steps=args.num_env_steps,
         num_processes=args.num_processes,
@@ -468,14 +516,19 @@ def main(arglist):
         # policy_kwargs=dict(
         # ),
     )
-    startup_line = configure_wl(args, variant["algorithm_kwargs"]["policy_kwargs"])
-    if startup_line is not None:
-        print(startup_line, flush=True)
+    wl_line = configure_wl(args, variant["algorithm_kwargs"]["policy_kwargs"])
+    if wl_line is not None:
+        print(wl_line, flush=True)
     # Only passed when chunking is requested, so a default run builds exactly the same model
     if args.update_chunks != 1:
         variant["algorithm_kwargs"]["update_chunks"] = args.update_chunks
     if args.log_grad_norms:
         variant["algorithm_kwargs"]["log_grad_norms"] = True
+    if args.diag_occupancy:
+        variant["algorithm_kwargs"]["diag_occupancy"] = {
+            "out_dir": DIAG_OUT_DIR, "run_name": diag_run_name(args.log_dir, args.seed),
+            "loss_grad_every": DIAG_LOSS_GRAD_EVERY,
+        }
     # optionally set the GPU (default=False)
     run(variant)
 
