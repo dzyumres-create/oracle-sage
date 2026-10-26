@@ -251,6 +251,12 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
                     selected_values = th.where(select_random, random_values, selected_values) 
                     selected_plans = np.where(select_random.cpu(), random_plans, selected_plans) 
 
+            if self.diag_stash is not None:
+                self.diag_stash.update(
+                    candidates=a.detach().clone(),  # [k, n_graphs] node ids th.multinomial drew
+                    path_values=None if self.num_planning_choices == 1 else projected_values.detach().clone(),  # [n_graphs, k]
+                )
+
 
         else:
             selected_actions = eval_action.long()            

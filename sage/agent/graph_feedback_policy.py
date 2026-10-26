@@ -248,6 +248,11 @@ class GNNFeedbackPolicy(GNNPolicy):
                 edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
             )
 
+    # --diag-occupancy (logging only): PlanFeedback_A2C sets this to {} around a collection
+    # forward, and _choose_node/_choose_top_action put detached copies of what they computed
+    # in it. None (the default, and always during training) means nothing is stashed.
+    diag_stash = None
+
     def _on_step(self, current_progress_remaining) -> None:
         """
         Update the exploration rate.
@@ -419,6 +424,14 @@ class GNNFeedbackPolicy(GNNPolicy):
         masked_probs = p_a1[mask.bool()]
         log_probs = th.log(masked_probs)
         entropy = (-masked_probs*log_probs).sum()/n
+
+        if self.diag_stash is not None:
+            self.diag_stash.update(
+                logits=x_a1.detach().clone(),  # raw, before masked_segmented_softmax's clamp
+                mask=mask.detach().clone(),
+                batch_index=batch.batch.detach().clone(),
+                probs=p_a1.detach().clone(),
+            )
 
         return a1,p_a1,data_starts,entropy
 
