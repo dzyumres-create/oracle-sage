@@ -180,6 +180,14 @@ def main(arglist):
              "chart_logs/diag/<log-dir name>_s<seed>_{decisions,bootstrap,updates}.csv plus diag/* in the "
              "printed log. Ternary env with --feedback --planner only; does not change training.",
     )
+    parser.add_argument(
+        "--clamp-mode",
+        choices=["absolute", "relative"],
+        default="absolute",
+        help="how the action logits are bounded before the softmax: absolute (default, the original "
+             "clamp to [-30, 30]) or relative (minus each graph's max valid logit, clamped to [-60, 0]; "
+             "the same policy wherever every valid logit is within [-30, 30]). Requires --feedback.",
+    )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
         "--learning-rate", type=float, default=0.00025, help="learning rate"
@@ -358,6 +366,9 @@ def main(arglist):
     if args.log_grad_norms and not args.feedback:
         raise ValueError("--log-grad-norms is only implemented for the feedback algorithms (Feedback_A2C / "
                          "PlanFeedback_A2C); pass --feedback")
+    if args.clamp_mode != "absolute" and not args.feedback:
+        raise ValueError("--clamp-mode is only implemented for the feedback policies (GNNFeedbackPolicy / "
+                         "GNNPlanFeedbackPolicy); pass --feedback")
     if args.diag_occupancy:
         validate_diag_occupancy(args.env_name, args.feedback, args.planner)
     if args.oracle_decoder:
@@ -419,6 +430,10 @@ def main(arglist):
         variant["algorithm_kwargs"]["update_chunks"] = args.update_chunks
     if args.log_grad_norms:
         variant["algorithm_kwargs"]["log_grad_norms"] = True
+    # Only passed when not the default, so a default run builds exactly the same model (and the
+    # zip's policy_kwargs records "relative" whenever it was used)
+    if args.clamp_mode != "absolute":
+        variant["algorithm_kwargs"]["policy_kwargs"]["clamp_mode"] = args.clamp_mode
     if args.diag_occupancy:
         variant["algorithm_kwargs"]["diag_occupancy"] = {
             "out_dir": DIAG_OUT_DIR, "run_name": diag_run_name(args.log_dir, args.seed),

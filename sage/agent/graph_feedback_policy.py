@@ -36,7 +36,7 @@ from sage.agent.graph_net import MultiMessagePassing
 from sage.domains.utils.spaces import BinaryAction
 from sage.domains.gym_nle.utils.representations import encode_actions
 
-from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, EMB_SIZE, GNNPolicy
+from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, EMB_SIZE, GNNPolicy, CLAMP_MODES
 
 def segmented_sample(probs, splits, num_samples):
     """
@@ -203,8 +203,14 @@ class GNNFeedbackPolicy(GNNPolicy):
         exploration_fraction: float = 0.1,
         shared_gnn: bool = False,
         layer_norm: bool = False,
+        clamp_mode: str = "absolute",
     ):
 
+        if clamp_mode not in CLAMP_MODES:
+            raise ValueError(f"clamp_mode must be one of {CLAMP_MODES}, got {clamp_mode!r}")
+        # how masked_segmented_softmax bounds the action logits (--clamp-mode); used by every
+        # _choose_node call, so collection and evaluate_actions share it
+        self.clamp_mode = clamp_mode
         self.num_planning_choices = num_planning_choices
         self.shared_gnn = shared_gnn
 
@@ -416,7 +422,7 @@ class GNNFeedbackPolicy(GNNPolicy):
 
         mask, data_splits, data_starts = make_mask(batch)
 
-        p_a1 = masked_segmented_softmax(x_a1, mask, batch.batch)  
+        p_a1 = masked_segmented_softmax(x_a1, mask, batch.batch, self.clamp_mode)  
       
         a1 = segmented_sample(p_a1, data_splits,self.num_planning_choices) 
       

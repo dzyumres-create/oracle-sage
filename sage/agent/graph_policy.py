@@ -10,6 +10,7 @@ import numpy as np
 from torch_geometric.data import  Batch
 
 from torch_geometric.utils import  softmax
+import torch_scatter
 
 from sage.forks.stable_baselines3.stable_baselines3.common.policies import BasePolicy
 from sage.forks.stable_baselines3.stable_baselines3.common.preprocessing import get_action_dim, is_image_space, preprocess_obs
@@ -41,8 +42,33 @@ def get_start_indices(splits):
     start_indices = th.cumsum(splits, 0)
     return start_indices
 
-def masked_segmented_softmax(energies, mask, batch_ind):
-    energies = energies.clamp(-30,30) 
+LOGIT_CLAMP = 30
+# --clamp-mode relative keeps the absolute clamp's window width (from -30 to 30 is 60), so pi is
+# unchanged on every state whose valid logits all lie within [-30, 30]
+RELATIVE_CLAMP_WINDOW = 2 * LOGIT_CLAMP
+CLAMP_MODES = ("absolute", "relative")
+
+def relative_clamp(energies, mask, batch_ind):
+    """
+    --clamp-mode relative: each graph's logits minus the (detached) max over its valid nodes,
+    clamped to [-RELATIVE_CLAMP_WINDOW, 0]. Softmax is shift-invariant, so this differs from the
+    absolute clamp only where that one is active: no uniform collapse when every valid logit is
+    below -30, and no frozen +30 cap on the top node (the top node sits at exactly 0, the
+    clamp's inclusive bound, so its gradient passes). torch_scatter.scatter_max (torch-scatter
+    2.0.7 / torch 1.7.1 and later). A graph with no valid node keeps a shift of 0.
+    """
+    valid = mask.bool()
+    top, _ = torch_scatter.scatter_max(energies.detach().masked_fill(~valid, -np.inf), batch_ind, dim=0)
+    top = th.where(th.isfinite(top), top, th.zeros_like(top))
+    return (energies - top[batch_ind]).clamp(-RELATIVE_CLAMP_WINDOW, 0)
+
+def masked_segmented_softmax(energies, mask, batch_ind, clamp_mode="absolute"):
+    if clamp_mode == "absolute":
+        energies = energies.clamp(-30,30) 
+    elif clamp_mode == "relative":
+        energies = relative_clamp(energies, mask, batch_ind)
+    else:
+        raise ValueError(f"clamp_mode must be one of {CLAMP_MODES}, got {clamp_mode!r}")
     energies[~mask.bool()] = -np.inf
     probs = softmax(energies, batch_ind) 
 
