@@ -27,7 +27,7 @@ Conventions:
     ternary converter orders the selectable nodes.
   - pi probabilities (p_*, cand*_p) are the float32 values the policy used. Entropy, KL and
     pg_proxy are recomputed in float64 from the raw logits exactly as masked_segmented_softmax
-    builds pi (clamp to [-30, 30], invalid nodes excluded).
+    builds pi under the policy's clamp_mode (clamp_logits), invalid nodes excluded.
   - Candidates are ordered by pi probability, highest first, ties kept in draw order;
     cand*_draw is each one's position in th.multinomial's draw (what the logger's
     action_selection/* metrics index by -- at initialisation many locations tie exactly).
@@ -51,6 +51,7 @@ from sage.domains.gym_taxi.envs.taxi_env import (
 
 TAXI_NODE = 0
 LOGIT_CLAMP = 30.0  # masked_segmented_softmax's clamp
+RELATIVE_CLAMP_WINDOW = 2 * LOGIT_CLAMP  # graph_policy.RELATIVE_CLAMP_WINDOW (--clamp-mode relative)
 
 NODE_TYPES = ("taxi", "location", "waiting_passenger", "carried_passenger")
 # delivered / fail_*: the plan's dropoff (always its last action) and what it did; fail_empty is a
@@ -124,10 +125,21 @@ def node_type(node, n_locations, carried):
     return "carried_passenger" if node == carried else "waiting_passenger"
 
 
-def log_policy(logits, mask):
+def clamp_logits(logits, mask, clamp_mode="absolute"):
+    """float64 logits after masked_segmented_softmax's clamp for this graph: absolute clips to
+    [-30, 30]; relative subtracts the max over valid nodes and clips to [-60, 0]."""
+    z = logits.astype(np.float64)
+    if clamp_mode == "absolute":
+        return np.clip(z, -LOGIT_CLAMP, LOGIT_CLAMP)
+    if clamp_mode == "relative":
+        return np.clip(z - z[mask].max(), -RELATIVE_CLAMP_WINDOW, 0.0)
+    raise ValueError(f"unknown clamp_mode {clamp_mode!r}")
+
+
+def log_policy(logits, mask, clamp_mode="absolute"):
     """float64 log pi over one graph's nodes, as masked_segmented_softmax builds pi; -inf on
     invalid nodes."""
-    z = np.clip(logits.astype(np.float64), -LOGIT_CLAMP, LOGIT_CLAMP)
+    z = clamp_logits(logits, mask, clamp_mode)
     valid = z[mask]
     top = valid.max()
     log_norm = top + math.log(np.exp(valid - top).sum())
@@ -149,9 +161,9 @@ def fmt(value):
 class _GraphView(object):
     """One graph of one forward, from the stash. All arrays are this graph's nodes only."""
 
-    def __init__(self, logits, mask, probs, candidates, path_values):
+    def __init__(self, logits, mask, probs, candidates, path_values, clamp_mode="absolute"):
         self.mask = mask
-        self.logp = log_policy(logits, mask)
+        self.logp = log_policy(logits, mask, clamp_mode)
         p64 = np.exp(self.logp)
         self.p64 = p64
         self.p = probs.astype(np.float64)  # the float32 pi the policy used
@@ -231,7 +243,8 @@ class OccupancyDiagnostics(object):
         for g in range(n):
             s, e = starts[g], starts[g] + counts[g]
             views.append(_GraphView(logits[s:e], mask[s:e], probs[s:e], candidates[:, g],
-                                    None if path_values is None else path_values[g]))
+                                    None if path_values is None else path_values[g],
+                                    getattr(policy, "clamp_mode", "absolute")))
         return views
 
     def _candidate_columns(self):
