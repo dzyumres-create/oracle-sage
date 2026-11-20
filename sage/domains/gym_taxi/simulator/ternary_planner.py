@@ -609,6 +609,14 @@ def plan_on_facts(facts, goal):
         Otherwise: move to their waiting location, pick up (implicitly, by planning
         straight through to delivery -- no intermediate "aboard" state is ever
         represented, matching every existing convention), then to their destination.
+      - goal == a waiting passenger while ANOTHER passenger is aboard (paper-unified F2):
+        the same actions, but the projection follows the simulator's rules instead of
+        assuming a delivery of the goal. TernaryTaxiWorldSimulator._attempt_pickup fails
+        when the taxi is occupied, so the goal passenger stays waiting where they are;
+        the final dropoff acts on the passenger aboard, who is delivered if the goal's
+        destination is their own destination too (buddies can share one) and otherwise
+        stays aboard. Either way the taxi ends at the goal's destination. Before F2 the
+        projection showed the goal passenger delivered, which never happened.
       - goal == a location: move there.
       - an empty action list becomes [taxi's current location] (a no-op action),
         matching move()/deliver_current_passenger()/plan_atom's own convention.
@@ -684,8 +692,16 @@ def plan_on_facts(facts, goal):
             destination = destination_of(goal)
             move1 = find_path_to(taxi_location, origin)
             move2 = find_path_to(origin, destination)
-            projected_facts = _deliver_facts(facts, goal, destination)
             actions = move1 + [goal] + move2 + [taxi_node]
+            if aboard is None:
+                projected_facts = _deliver_facts(facts, goal, destination)
+            elif destination_of(aboard) == destination:
+                # occupied taxi: the pickup fails, and the dropoff at the goal's destination
+                # happens to be the aboard passenger's own destination -- they are delivered
+                projected_facts = _deliver_facts(facts, aboard, destination)
+            else:
+                # occupied taxi: the pickup fails and so does the dropoff -- only the taxi moved
+                projected_facts = _move_taxi_facts(facts, destination)
     else:
         actions = find_path_to(taxi_location, goal)
         projected_facts = _move_taxi_facts(facts, goal)
