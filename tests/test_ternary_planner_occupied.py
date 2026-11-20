@@ -91,6 +91,27 @@ def occupied_sims(seeds=range(6), per_seed=12, sample_every=3, random_prob=0.2):
     return out
 
 
+def check_occupied_steps(test, sim, goal, actions):
+    """Step by step in a copy of the simulator: the pickup of the goal passenger fails
+    (taxi occupied); the passenger aboard stays aboard until the final drop-off; the goal
+    passenger never moves and is never picked up. Ids don't change before the drop-off
+    (only a delivery renumbers passengers)."""
+    aboard = sim.taxi.passenger
+    pickup_index = actions.index(goal)  # the plan's only action on a passenger id
+    origin = sim.passengers[goal].location
+    step_sim = copy.deepcopy(sim)
+    step_sim.pair_creation_probability = 0
+    step_sim.passenger_creation_probability = 0
+    for i, action in enumerate(actions[:-1]):  # everything before the drop-off
+        reward = step_sim.act(int(action))[1]
+        if i == pickup_index:
+            test.assertEqual(action, goal)
+            test.assertEqual(reward, sim.rewards["failed-action"], "pickup must fail while occupied")
+        test.assertEqual(step_sim.taxi.passenger, aboard, f"step {i}: the passenger aboard must stay aboard")
+        test.assertEqual(step_sim.passengers[goal].location, origin, f"step {i}: the goal passenger must stay waiting")
+        test.assertIsNone(step_sim.passengers[goal].picked_up_at)
+
+
 def all_goals(sim):
     """The taxi, the taxi's location, a neighbouring location, every passenger."""
     neighbour = next(iter(sim.roads.successors(sim.taxi.location)))
@@ -117,6 +138,7 @@ class TestPlanOnFactsMatchesExecution(unittest.TestCase):
                     self.assertEqual(projected, executed.facts())
                     if goal in sim.passengers and goal != sim.taxi.passenger:
                         n_wait_goals += 1
+                        check_occupied_steps(self, sim, goal, actions)
                         if rewards[-1] == sim.rewards["drop-off"]:
                             n_delivered_aboard += 1
         print(f"\n[occupied] {n_wait_goals} waiting-passenger goals with a passenger aboard; "
@@ -160,6 +182,8 @@ class TestOccupiedWaitingGoal(unittest.TestCase):
         self.assertEqual(actions, move1 + [goal] + move2 + [TAXI], "F2 must keep the action sequence")
         executed, rewards = executed_copy(sim, actions)
         self.assertEqual(projected, executed.facts())
+        self.assertEqual(actions.index(goal), len(move1))
+        check_occupied_steps(self, sim, goal, actions)
         return projected, executed, rewards
 
     def test_aboard_passenger_delivered_at_shared_destination(self):
