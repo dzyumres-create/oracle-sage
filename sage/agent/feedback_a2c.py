@@ -276,9 +276,10 @@ class Feedback_A2C(A2C):
     def _grad_norms(self) -> Dict[str, float]:
         """
         The gradient norms going into clip_grad_norm_ (see _log_grad_norms), plus
-        grad_norm_frozen: the norm over every policy parameter the optimizer does not update
-        (path_value_net; also gnn_extractor2 without --shared-gnn), whose gradients are never
-        zeroed. Reads .grad, changes nothing.
+        grad_norm_frozen: the norm over every policy parameter the optimizer does not update,
+        whose gradients are never zeroed. Before the optimizer-timing fix (e828320) that was
+        path_value_net (and gnn_extractor2 without --shared-gnn); with it, as on this branch,
+        every parameter is in the optimizer and this is 0. Reads .grad, changes nothing.
         """
         def norm(params):
             norms = [p.grad.detach().norm(2) for p in params if p.grad is not None]

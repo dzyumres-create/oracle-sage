@@ -102,8 +102,8 @@ def run_gnn_global(argv, workdir, loss_grad_every=None):
     real_step = AsyncVecEnv.step
     real_record, real_record_mean = logger.record, logger.record_mean
 
-    def step_spy(self, actions, mask):
-        out = real_step(self, actions, mask)
+    def step_spy(self, actions, mask, *rest):  # rest: obs_mask (ternary-wl's observation skip)
+        out = real_step(self, actions, mask, *rest)
         steps.append((np.array(actions), np.array(mask), out[1].copy(), out[2].copy()))
         return out
 
@@ -363,8 +363,8 @@ class TestGroundTruth(_TempDirCase):
         terminal = defaultdict(list)  # env -> [episode info at each done]
         real_step = AsyncVecEnv.step
 
-        def step_spy(self_env, actions, mask):
-            out = real_step(self_env, actions, mask)
+        def step_spy(self_env, actions, mask, *rest):
+            out = real_step(self_env, actions, mask, *rest)
             for i in np.flatnonzero(mask):
                 if out[2][i]:
                     terminal[i].append(out[3][i]["episode"])
@@ -521,8 +521,10 @@ class TestConsistency(_TempDirCase):
     def test_grad_norms_recorded(self):
         for row in self.csv["updates"]:
             total = num(row["grad_norm_total"])
-            # shared GNN: path_value_net is the only parameter outside the optimizer
-            self.assertEqual(row["grad_norm_frozen"], row["grad_norm_head"])
+            # the optimizer-timing fix (e828320, on this branch): path_value_net is in the
+            # optimizer, so no parameter is outside it and the frozen norm is exactly 0
+            self.assertEqual(num(row["grad_norm_frozen"]), 0.0)
+            self.assertGreater(num(row["grad_norm_head"]), 0.0)
             self.assertAlmostEqual(total ** 2, num(row["grad_norm_train"]) ** 2 + num(row["grad_norm_frozen"]) ** 2,
                                    delta=1e-5 * total ** 2)
 
