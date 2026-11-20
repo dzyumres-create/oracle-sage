@@ -395,7 +395,8 @@ class TestRunNaming(unittest.TestCase):
             raise Stop()
 
         for flag in (False, True):
-            variant = self._variant(self.ARGS + (["--oracle-decoder", "--planner"] if flag else ["--planner"]))
+            # --allow-dirty: run() checks the git tree first; tests run on uncommitted work too
+            variant = self._variant(self.ARGS + ["--allow-dirty"] + (["--oracle-decoder", "--planner"] if flag else ["--planner"]))
             with mock.patch.object(gnn_global, "make_vec_env", side_effect=fake_make_vec_env):
                 with self.assertRaises(Stop):
                     gnn_global.run(variant)

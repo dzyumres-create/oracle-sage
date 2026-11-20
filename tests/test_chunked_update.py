@@ -576,7 +576,8 @@ class TestGnnGlobalWiring(unittest.TestCase):
         class Stop(Exception):
             pass
 
-        for argv, expected in ((self.BASE, 1), (self.BASE + ["--update-chunks", "4"], 4)):
+        # --allow-dirty: run() checks the git tree first; tests run on uncommitted work too
+        for argv, expected in ((self.BASE + ["--allow-dirty"], 1), (self.BASE + ["--allow-dirty", "--update-chunks", "4"], 4)):
             captured = {}
 
             def stop_learn(model_self, *args, **kwargs):

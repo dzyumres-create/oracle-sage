@@ -131,7 +131,8 @@ def run_gnn_global(argv, workdir, loss_grad_every=None):
                 mock.patch.object(logger, "record", side_effect=record_spy), \
                 mock.patch.object(logger, "record_mean", side_effect=record_mean_spy), \
                 mock.patch.object(gnn_global, "DIAG_LOSS_GRAD_EVERY", loss_grad_every or gnn_global.DIAG_LOSS_GRAD_EVERY):
-            gnn_global.main(argv + ["--log-dir", os.path.join(workdir, "logs", "cell1"),
+            # --allow-dirty: run() checks the git tree first; tests run on uncommitted work too
+            gnn_global.main(argv + ["--allow-dirty", "--log-dir", os.path.join(workdir, "logs", "cell1"),
                                     "--save-dir", os.path.join(workdir, "models")])
         rng = {"torch": th.get_rng_state(), "numpy": np.random.get_state()}
     finally:
@@ -651,11 +652,11 @@ class TestWiring(unittest.TestCase):
             shutil.rmtree(d)
 
     def test_startup_line(self):
-        commit, dirty = gnn_global.git_provenance()
+        commit, entries = gnn_global.git_provenance()
         line = gnn_global.startup_line(["--seed", "3"])
         self.assertTrue(line.startswith("startup: argv="))
         self.assertIn("main_args=['--seed', '3']", line)
-        self.assertIn(f"commit={commit} dirty={dirty}", line)
+        self.assertIn(f"commit={commit} dirty={gnn_global.dirty_label(entries)}", line)
         self.assertEqual(len(commit), 40)  # the test runs inside the repository
         out = io.StringIO()
         with mock.patch("sys.stdout", out), mock.patch.object(gnn_global, "run"):

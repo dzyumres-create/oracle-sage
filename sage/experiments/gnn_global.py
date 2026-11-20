@@ -35,23 +35,52 @@ DIAG_OUT_DIR = os.path.join("chart_logs", "diag")
 DIAG_LOSS_GRAD_EVERY = 5  # --diag-occupancy's per-loss-term gradients: every 5th update
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-def git_provenance():
-    """(commit hash, dirty) of the checkout this file lives in; ("unknown", "unknown") when git or
-    the repository is unavailable. Dirty means tracked files differ from HEAD (untracked files,
-    e.g. logs, don't count)."""
+# Untracked files here can change a run (an untracked module can be imported), so they make
+# the tree dirty; untracked files elsewhere (logs, models, notes) do not.
+CODE_DIRS = ("sage/",)
+
+def git_provenance(root=REPO_ROOT):
+    """(commit hash, dirty entries) of the checkout at `root`. The entries are `git status
+    --porcelain` lines: every tracked file that differs from HEAD, plus untracked files under
+    CODE_DIRS; [] means clean. ("unknown", None) when git or the repository is unavailable."""
     try:
-        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT,
+        commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root,
                                          stderr=subprocess.DEVNULL, timeout=30).decode().strip()
-        status = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO_ROOT,
+        status = subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=all"], cwd=root,
                                          stderr=subprocess.DEVNULL, timeout=30).decode()
-        return commit, bool(status.strip())
     except (OSError, subprocess.SubprocessError):
-        return "unknown", "unknown"
+        return "unknown", None
+    entries = []
+    for line in status.splitlines():
+        if line.startswith("??") and not line[3:].startswith(CODE_DIRS):
+            continue
+        entries.append(line)
+    return commit, entries
+
+def dirty_label(entries):
+    """The dirty= value logged: True / False, or "unknown" without git."""
+    return "unknown" if entries is None else bool(entries)
 
 def startup_line(arglist):
     """Logging only: the run's full command line and code version, printed before anything else."""
-    commit, dirty = git_provenance()
-    return f"startup: argv={sys.argv!r} main_args={list(arglist)!r} commit={commit} dirty={dirty}"
+    commit, entries = git_provenance()
+    return f"startup: argv={sys.argv!r} main_args={list(arglist)!r} commit={commit} dirty={dirty_label(entries)}"
+
+def require_clean_tree(allow_dirty):
+    """Provenance guard, called by run() before anything is built: a run must come from a
+    commit. Refuses (SystemExit) when the tree is dirty (see git_provenance) or its state is
+    unknown, unless allow_dirty (--allow-dirty); with the override, the dirty entries are
+    printed so the log shows what differed from the commit."""
+    commit, entries = git_provenance()
+    if entries == []:
+        return
+    if entries is None:
+        problem = "cannot read the git state (no git, or not a repository)"
+    else:
+        problem = f"the git tree is dirty at {commit}:\n  " + "\n  ".join(entries)
+    if not allow_dirty:
+        raise SystemExit(f"refusing to start: {problem}\nCommit the changes, or pass --allow-dirty to run anyway.")
+    print(f"WARNING --allow-dirty: {problem}", flush=True)
 
 def is_ternary_env(env_name):
     """Ternary-ness comes from the registered spec's own kwargs, read through
@@ -99,16 +128,12 @@ def oracle_decoder_dir(path):
     return path.rstrip("/\\") + ORACLE_DECODER_SUFFIX
 
 def git_commit():
-    """HEAD of the checkout this file lives in, with "+dirty" if tracked files are modified;
-    "unknown" if git is unavailable. Logging only."""
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    try:
-        head = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
-        dirty = subprocess.check_output(["git", "-C", root, "status", "--porcelain", "--untracked-files=no"],
-                                        stderr=subprocess.DEVNULL).decode().strip()
-    except Exception:
+    """HEAD of the checkout this file lives in, with "+dirty" if the tree is dirty (see
+    git_provenance); "unknown" if git is unavailable. Logging only."""
+    commit, entries = git_provenance()
+    if entries is None:
         return "unknown"
-    return head + ("+dirty" if dirty else "")
+    return commit + ("+dirty" if entries else "")
 
 def configure_wl(args, policy_kwargs):
     """
@@ -168,6 +193,7 @@ def configure_wl(args, policy_kwargs):
             f"git_commit={git_commit()}")
 
 def run(variant):
+    require_clean_tree(variant.get("allow_dirty", False))
 
     info_keywords = info_keywords_for(variant["env_name"])
 
@@ -260,6 +286,13 @@ def main(arglist):
         help="how the action logits are bounded before the softmax: absolute (default, the original "
              "clamp to [-30, 30]) or relative (minus each graph's max valid logit, clamped to [-60, 0]; "
              "the same policy wherever every valid logit is within [-30, 30]). Requires --feedback.",
+    )
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        default=False,
+        help="start even if the git tree is dirty (tracked changes, or untracked files under sage/) "
+             "or its state is unknown; the dirty files are printed. Without it, such a run refuses to start.",
     )
     parser.add_argument("--epochs", type=int, default=200, help="number of epochs")
     parser.add_argument(
@@ -491,6 +524,7 @@ def main(arglist):
         graph_convention=args.graph_convention,
         oracle_decoder=args.oracle_decoder,
         diag_occupancy=args.diag_occupancy,
+        allow_dirty=args.allow_dirty,
         seed=args.seed,
         num_env_steps=args.num_env_steps,
         num_processes=args.num_processes,
