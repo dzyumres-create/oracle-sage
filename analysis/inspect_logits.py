@@ -11,7 +11,8 @@ reference model, saved, and reloaded on later runs), split by whether the taxi w
 
 Models are loaded without unpickling the zip's JsonGraph: the policy is built with Cell 1's
 constructor and flags (CELL1_POLICY_KWARGS; checked against the zip's own policy_kwargs), then
-policy.pth and policy.optimizer.pth are loaded with load_state_dict. The zip's "data" JSON is read
+policy.pth and policy.optimizer.pth are loaded with load_state_dict (sage.agent.model_io; its
+load_policy is the general loader for every variant). The zip's "data" JSON is read
 only through a restricted unpickler (collections.deque, plus the AdamW class for policy_kwargs).
 
 Run from the repo root (CPU):
@@ -21,17 +22,13 @@ Writes analysis/inspect_logits_results.csv; the state set lives in
 analysis/data/inspect_logits_states.json.gz (built on first use, or with --rebuild-states).
 """
 import argparse
-import base64
 import copy
 import csv
 import gzip
-import io
 import json
 import math
 import os
-import pickle
 import sys
-import zipfile
 
 from unittest import mock
 
@@ -43,6 +40,11 @@ import torch as th
 import sage.domains.gym_taxi  # registers the ternary env
 from sage.agent.diag_occupancy import log_policy as _log_policy
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
+# The loader itself lives in sage/agent/model_io.py (moved there from this file); these names
+# are re-exported so this script and its tests keep working unchanged.
+from sage.agent.model_io import (  # noqa: F401
+    RestrictedUnpickler, decode_serialized, load_weights, read_zip, saved_policy_kwargs,
+)
 from sage.domains.gym_taxi.envs.taxi_env import GraphTaxiEnv
 from sage.domains.gym_taxi.utils.compat import spec_kwargs
 
@@ -92,34 +94,6 @@ STATE_MODEL = DEFAULT_MODELS[0][2]  # the new seed-0 model
 # Loading
 # ==========================================================================================
 
-class RestrictedUnpickler(pickle.Unpickler):
-    """Unpickles only the globals in `allowed` ({(module, name)}); anything else raises."""
-
-    def __init__(self, data, allowed):
-        super(RestrictedUnpickler, self).__init__(io.BytesIO(data))
-        self.allowed = allowed
-
-    def find_class(self, module, name):
-        if (module, name) in self.allowed:
-            return super(RestrictedUnpickler, self).find_class(module, name)
-        raise pickle.UnpicklingError(f"restricted unpickler: {module}.{name} is not allowed")
-
-
-def decode_serialized(entry, allowed):
-    """One SB3 "data" JSON entry ({":type:", ":serialized:" base64 pickle}) through the restricted
-    unpickler."""
-    return RestrictedUnpickler(base64.b64decode(entry[":serialized:"]), allowed).load()
-
-
-def read_zip(zip_path):
-    """(data JSON, policy state_dict, optimizer state_dict) -- tensors mapped to CPU."""
-    with zipfile.ZipFile(zip_path) as z:
-        data = json.loads(z.read("data").decode())
-        policy_state = th.load(io.BytesIO(z.read("policy.pth")), map_location="cpu")
-        optimizer_state = th.load(io.BytesIO(z.read("policy.optimizer.pth")), map_location="cpu")
-    return data, policy_state, optimizer_state
-
-
 def make_env():
     """The ternary env. GraphTaxiEnv builds its first maze inside __init__ from seeding.np_random,
     which on gym 0.26 is a numpy Generator the maze generator can't use (no randint); construct it
@@ -141,10 +115,6 @@ def build_policy(env=None, clamp_mode="absolute"):
     return GNNPlanFeedbackPolicy(env.observation_space, env.action_space, lambda _progress: LEARNING_RATE, **kwargs)
 
 
-def saved_policy_kwargs(data):
-    return decode_serialized(data["policy_kwargs"], {("torch.optim.adamw", "AdamW")})
-
-
 def load_policy(zip_path, env=None, clamp_mode=None):
     """(policy with the zip's weights and AdamW state, the zip's data JSON). clamp_mode None uses
     the one the model was trained with (its saved policy_kwargs); a mode overrides it."""
@@ -152,13 +122,7 @@ def load_policy(zip_path, env=None, clamp_mode=None):
     if clamp_mode is None:
         clamp_mode = saved_policy_kwargs(data).get("clamp_mode", "absolute")
     policy = build_policy(env, clamp_mode)
-    policy.load_state_dict(policy_state)
-    policy.optimizer.load_state_dict(optimizer_state)
-    params = [p for group in policy.optimizer.param_groups for p in group["params"]]
-    for p in params:  # load_state_dict checks group sizes, not shapes
-        state = policy.optimizer.state.get(p, {})
-        if "exp_avg" in state and state["exp_avg"].shape != p.shape:
-            raise ValueError(f"{zip_path}: optimizer state shape {tuple(state['exp_avg'].shape)} != {tuple(p.shape)}")
+    load_weights(policy, policy_state, optimizer_state, source=str(zip_path))
     policy.eval()
     return policy, data
 
