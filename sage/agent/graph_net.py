@@ -102,4 +102,51 @@ class GraphNet(MessagePassing):
         z = self.f_agg(z) + x # skip connection
 
         return z
+
+# ----------------------------------------------------------------------------------------
+# EGr (Horcik et al. 2025, Sec. 2): one message function per edge type, no edge labels;
+# each type's messages are aggregated separately (max, as GraphNet), and all the
+# aggregates go into the combine function together:
+#   v' = f_agg([v, x_global, agg_1(v), ..., agg_T(v)]) + v
+# Hidden size and skip connection as in GraphNet. Edges come from
+# sage.agent.edge_modes.split_by_type.
+class TypedGraphNet(Module):
+    def __init__(self, node_in_size, num_types, global_size, agg_size, node_out_size, activation_fn):
+        super().__init__()
+
+        self.num_types = num_types
+        self.f_mess = ModuleList( [Sequential( Linear(node_in_size, agg_size), activation_fn() ) for t in range(num_types)] )
+        self.f_agg  = Sequential( Linear(node_in_size + global_size + num_types * agg_size, node_out_size), activation_fn() )
+
+    def forward(self, x, typed_edges, xg, batch):
+        """:param typed_edges: list of (src, dst) index tensors, one per type"""
+        assert len(typed_edges) == self.num_types
+        n = x.shape[0]
+        aggs = []
+        for f_mess, (src, dst) in zip(self.f_mess, typed_edges):
+            m = f_mess(x[src])
+            # max over each node's messages of this type; a node with none gets 0
+            aggs.append(torch_scatter.scatter(m, dst, dim=0, dim_size=n, reduce='max'))
+
+        z = torch.cat([x, xg[batch]] + aggs, dim=1)
+        z = self.f_agg(z) + x # skip connection
+
+        return z
+
+class TypedMultiMessagePassing(Module):
+    """MultiMessagePassing with TypedGraphNet layers (EGr); same global node."""
+    def __init__(self, steps, num_types, node_in_size=EMB_SIZE, node_out_size=EMB_SIZE, global_size=EMB_SIZE, agg_size=EMB_SIZE, activation_fn=LeakyReLU):
+        super().__init__()
+
+        self.gnns = ModuleList( [TypedGraphNet(node_in_size, num_types, global_size, agg_size, node_out_size, activation_fn) for i in range(steps)] )
+        self.pools = ModuleList( [GlobalNode(node_out_size, global_size, activation_fn) for i in range(steps)] )
+
+        self.steps = steps
+
+    def forward(self, x, x_global, typed_edges, batch_ind, num_graphs):
+        for i in range(self.steps):
+            x = self.gnns[i](x, typed_edges, x_global, batch_ind)
+            x_global = self.pools[i](x_global, x, batch_ind)
+
+        return x, x_global
  
