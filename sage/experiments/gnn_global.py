@@ -535,6 +535,10 @@ def main(arglist):
         feedback=args.feedback,
         planner=args.planner,
         algorithm_kwargs=dict(
+            # seeds python, numpy and torch (CPU and CUDA) before the policy is built, so the
+            # initial weights follow --seed; it also re-seeds the envs with the same seed+rank
+            # make_vec_env used, before any reset, so the env streams are unchanged
+            seed=args.seed,
             gamma=args.gamma,
             tensorboard_log=args.log_dir,
             n_steps=args.num_steps,
