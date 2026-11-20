@@ -29,7 +29,9 @@ from sage.forks.stable_baselines3.stable_baselines3.common.distributions import 
     make_proba_distribution,
 )
 
-from sage.agent.graph_net import MultiMessagePassing
+from sage.agent.graph_net import MultiMessagePassing, TypedMultiMessagePassing
+from sage.agent.edge_modes import (DEFAULT_EDGE_MODE, EdgeTypeSpec, spec_from_observation_space, split_by_type,
+                                   to_mgr, validate_edge_mode)
 from sage.domains.utils.spaces import Autoregressive, BinaryAction, NodeAction
 
 EMB_SIZE = 32
@@ -136,12 +138,33 @@ class GNNExtractor(nn.Module):
         steps: int = 5,        
         activation_fn: Type[nn.Module] = nn.LeakyReLU(),
         device: Union[th.device, str] = "auto",
+        edge_mode: str = DEFAULT_EDGE_MODE,
+        edge_spec: Optional[EdgeTypeSpec] = None,
     ):
         super(GNNExtractor, self).__init__()
-        self.gnn = MultiMessagePassing(edge_size=edge_dim,steps=steps,activation_fn=activation_fn)
+        # --edge-mode (sage/agent/edge_modes.py). Every graph the policy encodes (observations,
+        # the current state, planner projections) comes through forward(), which turns the Gr
+        # graph into this mode's edges -- so they always share one mode, and nothing outside
+        # the network ever sees a non-Gr graph. gr builds exactly what it always did.
+        validate_edge_mode(edge_mode)
+        if edge_mode != "gr" and edge_spec is None:
+            raise ValueError(f"edge_mode {edge_mode!r} needs an edge_spec")
+        self.edge_mode = edge_mode
+        self.edge_spec = edge_spec if edge_mode != "gr" else None
+        if edge_mode == "gr":
+            self.gnn = MultiMessagePassing(edge_size=edge_dim,steps=steps,activation_fn=activation_fn)
+        elif edge_mode == "mgr":
+            self.gnn = MultiMessagePassing(edge_size=edge_spec.num_types,steps=steps,activation_fn=activation_fn)
+        else:
+            self.gnn = TypedMultiMessagePassing(steps=steps,num_types=edge_spec.num_types,activation_fn=activation_fn)
         device = get_device(device)
 
     def forward(self, node_features: th.Tensor, global_features: th.Tensor, edge_features: th.Tensor, edge_indices: th.Tensor, batch_ind: th.Tensor) -> Tuple[th.Tensor, th.Tensor]:
+        if self.edge_mode == "mgr":
+            edge_indices, edge_features = to_mgr(edge_indices, edge_features, self.edge_spec)
+        elif self.edge_mode == "egr":
+            typed_edges = split_by_type(edge_indices, edge_features, self.edge_spec)
+            return self.gnn(node_features,global_features,typed_edges,batch_ind,1)
         return self.gnn(node_features,global_features,edge_features,edge_indices,batch_ind,1)
 
 
@@ -198,8 +221,13 @@ class GNNPolicy(BasePolicy):
         normalize_images: bool = True,
         optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        edge_mode: str = DEFAULT_EDGE_MODE,
         **kwargs,
     ):
+        # --edge-mode (sage/agent/edge_modes.py): gr / mgr / egr. Checked against the
+        # observation space's representation before anything is built.
+        self.edge_mode = edge_mode
+        self.edge_spec = spec_from_observation_space(observation_space, edge_mode)
 
         if optimizer_kwargs is None:
             optimizer_kwargs = {}
@@ -299,8 +327,16 @@ class GNNPolicy(BasePolicy):
         #       really contain any layers (acts like an identity module).
 
         self.gnn_extractor = GNNExtractor(
-            edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
+            edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps,
+            **self._edge_mode_kwargs()
         )
+
+    def _edge_mode_kwargs(self) -> Dict[str, Any]:
+        """GNNExtractor kwargs for --edge-mode; empty for gr, so a gr GNNExtractor is built
+        with exactly the call it always had."""
+        if self.edge_mode == DEFAULT_EDGE_MODE:
+            return {}
+        return {"edge_mode": self.edge_mode, "edge_spec": self.edge_spec}
 
     def _build_gnn_extractor2(self) -> None:
         """

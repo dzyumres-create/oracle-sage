@@ -204,6 +204,7 @@ class GNNFeedbackPolicy(GNNPolicy):
         shared_gnn: bool = False,
         layer_norm: bool = False,
         clamp_mode: str = "absolute",
+        edge_mode: str = "gr",
     ):
         # Must be set before super().__init__(): _build_path_value_net()
         # (called from within that chain's _build(), before optimizer
@@ -248,6 +249,7 @@ class GNNFeedbackPolicy(GNNPolicy):
             normalize_images,
             optimizer_class,
             optimizer_kwargs,
+            edge_mode=edge_mode,
         )
 
     def _build_path_value_net(self) -> None:
@@ -281,7 +283,8 @@ class GNNFeedbackPolicy(GNNPolicy):
             # here, regardless of shared_gnn, whenever self.gnn_extractor
             # isn't itself a GNNExtractor.
             self.gnn_extractor2 = GNNExtractor(
-                edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps
+                edge_dim=self.edge_dim,activation_fn=self.activation_fn, device=self.device,steps=self.gnn_steps,
+                **self._edge_mode_kwargs()
             )
 
     # --diag-occupancy (logging only): PlanFeedback_A2C sets this to {} around a collection

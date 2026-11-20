@@ -109,6 +109,10 @@ class WLPlanFeedbackPolicy(GNNPlanFeedbackPolicy):
         # Must be set before super().__init__(): _build_gnn_extractor(),
         # called from within that chain, needs self.wl_vocab_path already
         # present to load the vocab and size the embedding table.
+        # --edge-mode is GNN-only (W4): WL rows stay on the Gr graph, including the
+        # discriminator's own GNNExtractor.
+        if kwargs.get("edge_mode", "gr") != "gr":
+            raise ValueError(f"WLPlanFeedbackPolicy supports edge_mode 'gr' only, got {kwargs['edge_mode']!r}")
         self.wl_vocab_path = wl_vocab_path
         # Both None by default (matching every existing caller, which never
         # passed either) - _load_vocab treats None as "skip this check", so

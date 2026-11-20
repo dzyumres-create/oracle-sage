@@ -20,6 +20,7 @@ from sage.agent.feedback_a2c import Feedback_A2C
 from sage.forks.stable_baselines3.stable_baselines3.common.utils import get_linear_fn
 from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_vec_env
 from sage.agent.graph_policy import GNNPolicy
+from sage.agent.edge_modes import DEFAULT_EDGE_MODE, EDGE_MODES, edge_type_spec, validate_edge_mode
 from sage.agent.graph_feedback_policy import GNNFeedbackPolicy
 from sage.agent.graph_plan_feedback_policy import GNNPlanFeedbackPolicy
 from sage.agent.wl_plan_feedback_policy import WLPlanFeedbackPolicy
@@ -126,6 +127,28 @@ def oracle_decoder_dir(path):
     so it can never overwrite or mix with a Cell 1 run given the same flags
     (e.g. ./logs/cell1_seed0 -> ./logs/cell1_seed0_oracle_decoder, ./logs/ -> ./logs_oracle_decoder)."""
     return path.rstrip("/\\") + ORACLE_DECODER_SUFFIX
+
+def validate_edge_mode_args(env_name, graph_convention, edge_mode, wl_vocab_path):
+    """--edge-mode mgr/egr (sage/agent/edge_modes.py): GNN only (no --wl-vocab-path), and only
+    for the representations this branch runs (MGr is skipped where it equals Gr). Returns the
+    EdgeTypeSpec, or None for gr."""
+    validate_edge_mode(edge_mode)
+    if edge_mode == DEFAULT_EDGE_MODE:
+        return None
+    if wl_vocab_path is not None:
+        raise ValueError(f"--edge-mode {edge_mode} is GNN-only; WL runs (--wl-vocab-path) use gr")
+    return edge_type_spec(graph_convention, is_ternary_env(env_name), edge_mode)
+
+def edge_mode_dir(path, edge_mode):
+    """save_dir/log_dir for an --edge-mode mgr/egr run: the path with "_<mode>" appended, so it
+    can never mix with the gr run given the same flags (./logs/x -> ./logs/x_egr)."""
+    if edge_mode == DEFAULT_EDGE_MODE:
+        return path
+    return path.rstrip("/\\") + "_" + edge_mode
+
+def edge_mode_line(spec, edge_mode):
+    """Logging only, printed at startup for mgr/egr runs."""
+    return f"edge mode: {edge_mode} ({spec.num_types} types: {', '.join(spec.names)})"
 
 def git_commit():
     """HEAD of the checkout this file lives in, with "+dirty" if the tree is dirty (see
@@ -254,6 +277,16 @@ def main(arglist):
         help="Cell 1 oracle-decoder condition: the GNN sees the object encoding as in Cell 1, "
              "the planner receives the true facts. Ternary env with --graph-convention oracle_sage "
              "only; appends '" + ORACLE_DECODER_SUFFIX + "' to --save-dir and --log-dir.",
+    )
+    parser.add_argument(
+        "--edge-mode",
+        choices=EDGE_MODES,
+        default=DEFAULT_EDGE_MODE,
+        help="edge form of the GNN input (Horcik et al. 2025): gr = one edge per pair with a "
+             "multi-hot label (the default, unchanged); mgr = one parallel edge per edge type, "
+             "one-hot labels; egr = one message function per edge type, no labels. Built inside "
+             "the GNN, so observations and planner projections always share it. GNN only; "
+             "appends '_mgr'/'_egr' to --save-dir and --log-dir.",
     )
     parser.add_argument(
         "--update-chunks",
@@ -510,6 +543,11 @@ def main(arglist):
         validate_oracle_decoder(args.env_name, args.graph_convention)
         args.save_dir = oracle_decoder_dir(args.save_dir)
         args.log_dir = oracle_decoder_dir(args.log_dir)
+    edge_spec = validate_edge_mode_args(args.env_name, args.graph_convention, args.edge_mode, args.wl_vocab_path)
+    if edge_spec is not None:
+        args.save_dir = edge_mode_dir(args.save_dir, args.edge_mode)
+        args.log_dir = edge_mode_dir(args.log_dir, args.edge_mode)
+        print(edge_mode_line(edge_spec, args.edge_mode), flush=True)
     if args.lr_decay:
         learning_rate = get_linear_fn(
             args.learning_rate, args.learning_rate/10, 0.5
@@ -577,6 +615,9 @@ def main(arglist):
     # zip's policy_kwargs records "relative" whenever it was used)
     if args.clamp_mode != "absolute":
         variant["algorithm_kwargs"]["policy_kwargs"]["clamp_mode"] = args.clamp_mode
+    # same pattern: only when not gr, so a gr run's model and zip are exactly as before
+    if args.edge_mode != DEFAULT_EDGE_MODE:
+        variant["algorithm_kwargs"]["policy_kwargs"]["edge_mode"] = args.edge_mode
     if args.diag_occupancy:
         variant["algorithm_kwargs"]["diag_occupancy"] = {
             "out_dir": DIAG_OUT_DIR, "run_name": diag_run_name(args.log_dir, args.seed),
