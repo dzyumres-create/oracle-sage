@@ -20,8 +20,9 @@ The other F0 checks already have tests on this branch, run alongside this file:
 Run from the repo root (CPU; not while a training run uses the GPU):
     PYTHONPATH=. python -m pytest tests/test_paper_unified_base.py -v
 """
+import base64
 import gzip
-import io
+import json
 import os
 import subprocess
 import tempfile
@@ -45,7 +46,7 @@ from sage.forks.stable_baselines3.stable_baselines3.common.env_util import make_
 from tests.test_ternary_wl_training_path import committed_vocab_path, wl_args
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REFERENCE = os.path.join(HERE, "fixtures", "policy_reference_5547edb.pt.gz")
+REFERENCE = os.path.join(HERE, "fixtures", "policy_reference_5547edb.json.gz")
 STD_ENV_ID = "city-taxi-unmasked-v1"
 TERNARY_ENV_ID = "city-taxi-ternary-unmasked-v1"
 # The fixture's policies, as gnn_global builds them for --planner --feedback --shared-gnn
@@ -57,16 +58,24 @@ POLICY_KWARGS = {"optimizer_class": th.optim.AdamW, "optimizer_kwargs": {"weight
 ATOL, RTOL = 1e-5, 1e-4
 
 
+def from_jsonable(obj):
+    """Inverse of analysis/make_policy_reference.py's to_jsonable: {"__tensor__": numpy dtype
+    string, "shape", "data": base64 raw bytes} -> a tensor, bit for bit."""
+    if isinstance(obj, dict):
+        if "__tensor__" in obj:
+            a = np.frombuffer(base64.b64decode(obj["data"]), dtype=np.dtype(obj["__tensor__"]))
+            return th.from_numpy(a.astype(a.dtype.newbyteorder("=")).reshape(obj["shape"]))
+        return {k: from_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [from_jsonable(v) for v in obj]
+    return obj
+
+
 def load_reference():
-    """The fixture (made by analysis/make_policy_reference.py at 5547edb): tensors, ints and
-    plain strings only, so it loads on torch 1.7 / numpy 1 (RCP) as well as on the Mac."""
-    with gzip.open(REFERENCE, "rb") as f:
-        buf = io.BytesIO(f.read())
-    try:
-        return th.load(buf, map_location="cpu", weights_only=False)
-    except TypeError:  # torch < 1.13 has no weights_only
-        buf.seek(0)
-        return th.load(buf, map_location="cpu")
+    """The fixture (made by analysis/make_policy_reference.py at 5547edb). Gzipped JSON, not a
+    torch/numpy pickle, so any torch or numpy version reads it (RCP: torch 1.7, numpy 1)."""
+    with gzip.open(REFERENCE, "rt") as f:
+        return from_jsonable(json.load(f))
 
 
 def build_model(env_id, convention, wl):
@@ -88,7 +97,7 @@ def build_model(env_id, convention, wl):
 
 class TestDefaultOutputsUnchanged(unittest.TestCase):
     """The base commit's policy outputs on fixed inputs (tests/fixtures/
-    policy_reference_5547edb.pt.gz: observations, weights, and the outputs recorded at
+    policy_reference_5547edb.json.gz: observations, weights, and the outputs recorded at
     5547edb), replayed on this commit with default settings.
 
     evaluate_actions (values, log-probs, entropy, discriminator values) is deterministic and

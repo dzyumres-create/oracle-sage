@@ -1,14 +1,20 @@
 """Record policy outputs on fixed inputs at the current commit (run at ternary-wl 5547edb).
 
 Run from the repo root at the base commit:
-    PYTHONPATH=. python analysis/make_policy_reference.py tests/fixtures/policy_reference_<commit>.pt.gz
+    PYTHONPATH=. python analysis/make_policy_reference.py tests/fixtures/policy_reference_<commit>.json.gz
 
 Saves, per case: the observations (JSON strings), the policy weights, the actions/values/
 log-probs/plans of a forward() under a fixed torch seed, and evaluate_actions() outputs on
-those actions. tests/test_default_policy_outputs.py replays them on the new code.
+those actions. tests/test_paper_unified_base.py replays them on the new code.
+
+The file is gzipped JSON, not a torch or numpy pickle, so any torch/numpy version reads it
+(a torch 2.x pickle failed to load on RCP's torch 1.7). A tensor is stored as
+{"__tensor__": numpy dtype string (little-endian), "shape": [...], "data": base64 of its raw
+bytes}, so values survive the round trip bit for bit.
 """
+import base64
 import gzip
-import io
+import json
 import sys
 
 import gym
@@ -100,15 +106,28 @@ def record(case):
     return out
 
 
+def to_jsonable(obj):
+    """Tensors -> {"__tensor__", "shape", "data"} (see the module docstring); dicts, lists and tuples recursively; the
+    rest (str, int, float, bool, None) unchanged."""
+    if isinstance(obj, th.Tensor):
+        a = obj.detach().cpu().numpy()
+        a = a.astype(a.dtype.newbyteorder("<"))
+        return {"__tensor__": a.dtype.str, "shape": list(a.shape),
+                "data": base64.b64encode(np.ascontiguousarray(a).tobytes()).decode("ascii")}
+    if isinstance(obj, dict):
+        return {str(k): to_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [to_jsonable(v) for v in obj]
+    return obj
+
+
 if __name__ == "__main__":
     th.set_num_threads(1)
     ref = {case[0]: record(case) for case in CASES}
     # forward() samples with th.multinomial: other torch versions may draw differently
     for v in ref.values():
-        v["torch_version"] = th.__version__
-    buf = io.BytesIO()
-    th.save(ref, buf)
-    with gzip.open(sys.argv[1], "wb") as f:
-        f.write(buf.getvalue())
+        v["torch_version"] = str(th.__version__)  # a plain string (torch 2.x returns a TorchVersion)
+    with gzip.open(sys.argv[1], "wt") as f:
+        json.dump(to_jsonable(ref), f)
     for k, v in ref.items():
         print(k, v["actions"].tolist(), {l: (e["actions"].tolist(), e["log_prob"].flatten().tolist()) for l, e in v["extra"].items()})
