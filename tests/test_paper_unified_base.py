@@ -238,6 +238,13 @@ class TestDirtyTreeGuard(unittest.TestCase):
                 f.write("x = 2\n")
             self.assertEqual(len(gnn_global.git_provenance(root)[1]), 1)
 
+    def test_no_bytecode_tracked(self):
+        """Tracked .pyc files are rewritten by every import on a new Python, which made every
+        RCP run dirty (90 were tracked until the .pyc untracking commit)."""
+        root = os.path.dirname(HERE)
+        tracked = subprocess.check_output(["git", "-C", root, "ls-files", "*.pyc"]).decode().split()
+        self.assertEqual(tracked, [])
+
     def test_git_provenance_unknown_without_repo(self):
         with tempfile.TemporaryDirectory() as root:
             self.assertEqual(gnn_global.git_provenance(root), ("unknown", None))
