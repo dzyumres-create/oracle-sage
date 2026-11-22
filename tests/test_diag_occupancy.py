@@ -572,7 +572,9 @@ class TestLossTermGradients(_TempDirCase):
         for u, (t, g) in enumerate(zip(terms, actual)):
             total = t["pol"] + t["ent"] + t["val"] + t["pv"]
             with self.subTest(update=u, update_chunks=update_chunks):
-                self.assertTrue(th.allclose(total, g, rtol=1e-4, atol=1e-7),
+                # four separately computed float32 gradients summed vs one backward: rounding
+                # differs by up to ~3e-7 per element on RCP (torch 1.7, |g| ~ 0.7), so atol 1e-6
+                self.assertTrue(th.allclose(total, g, rtol=1e-4, atol=1e-6),
                                 f"max |diff| {(total - g).abs().max().item():.2e}, |g| {g.norm().item():.2e}")
                 self.assertGreater(t["pol"].norm().item(), 0.0)
                 self.assertGreater(t["pv"].norm().item(), 0.0)
