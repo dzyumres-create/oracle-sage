@@ -46,7 +46,11 @@ LOGIT_CLAMP = 30
 # --clamp-mode relative keeps the absolute clamp's window width (from -30 to 30 is 60), so pi is
 # unchanged on every state whose valid logits all lie within [-30, 30]
 RELATIVE_CLAMP_WINDOW = 2 * LOGIT_CLAMP
-CLAMP_MODES = ("absolute", "relative")
+# absolute: the original hard clamp to [-30, 30] (the default); relative: see relative_clamp;
+# none: no bound (F3), with log pi from masked_segmented_log_softmax; soft: SOFT_CLAMP_SCALE *
+# tanh(x / SOFT_CLAMP_SCALE), bounded like absolute but with a gradient that is never exactly 0
+CLAMP_MODES = ("absolute", "relative", "none", "soft")
+SOFT_CLAMP_SCALE = LOGIT_CLAMP
 
 def relative_clamp(energies, mask, batch_ind):
     """
@@ -62,11 +66,43 @@ def relative_clamp(energies, mask, batch_ind):
     top = th.where(th.isfinite(top), top, th.zeros_like(top))
     return (energies - top[batch_ind]).clamp(-RELATIVE_CLAMP_WINDOW, 0)
 
+def soft_clamp(energies):
+    """--clamp-mode soft: c * tanh(x / c), c = SOFT_CLAMP_SCALE (30). Inside (-30, 30) like the
+    absolute clamp, so the gap between two logits stays below 60 and no probability underflows,
+    but the gradient factor sech^2(x / c) is never 0 (0.07 at |x| = 60, 0.005 at |x| = 100)."""
+    return SOFT_CLAMP_SCALE * th.tanh(energies / SOFT_CLAMP_SCALE)
+
+def masked_segmented_log_softmax(energies, mask, batch_ind):
+    """
+    --clamp-mode none: log pi per node with no bound on the logits, computed stably for any
+    logit gap: (x - max) - log(sum exp(x - max)) per graph, over valid nodes; -inf on invalid
+    nodes. The (detached) max makes exp overflow impossible; working in log space means a
+    probability that underflows to 0 in float32 (a node ~90+ below the top) still has a finite
+    log pi and finite gradients, where log(softmax(x)) would give -inf and a NaN entropy.
+    Softmax is shift-invariant, so detaching the max leaves the gradient exact. A graph with no
+    valid node keeps a shift of 0 (as relative_clamp does).
+    """
+    valid = mask.bool()
+    x = energies.masked_fill(~valid, -np.inf)
+    top, _ = torch_scatter.scatter_max(x.detach(), batch_ind, dim=0)
+    top = th.where(th.isfinite(top), top, th.zeros_like(top))
+    shifted = x - top[batch_ind]
+    sums = torch_scatter.scatter_add(shifted.exp(), batch_ind, dim=0)
+    # a graph with a valid node has sum >= 1 (its top node contributes exp(0)); one with none
+    # has sum 0, and log 1 = 0 keeps its nodes at -inf instead of -inf - (-inf) = NaN
+    log_sums = th.where(sums > 0, sums, th.ones_like(sums)).log()
+    return (shifted - log_sums[batch_ind]).flatten()
+
 def masked_segmented_softmax(energies, mask, batch_ind, clamp_mode="absolute"):
+    if clamp_mode == "none":
+        # exp of the stable log-softmax, so sampling uses exactly the pi the log-probs describe
+        return masked_segmented_log_softmax(energies, mask, batch_ind).exp()
     if clamp_mode == "absolute":
         energies = energies.clamp(-30,30) 
     elif clamp_mode == "relative":
         energies = relative_clamp(energies, mask, batch_ind)
+    elif clamp_mode == "soft":
+        energies = soft_clamp(energies)
     else:
         raise ValueError(f"clamp_mode must be one of {CLAMP_MODES}, got {clamp_mode!r}")
     energies[~mask.bool()] = -np.inf

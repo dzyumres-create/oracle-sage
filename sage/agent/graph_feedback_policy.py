@@ -36,7 +36,7 @@ from sage.agent.graph_net import MultiMessagePassing
 from sage.domains.utils.spaces import BinaryAction
 from sage.domains.gym_nle.utils.representations import encode_actions
 
-from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, EMB_SIZE, GNNPolicy, CLAMP_MODES
+from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, EMB_SIZE, GNNPolicy, CLAMP_MODES, masked_segmented_log_softmax
 
 def segmented_sample(probs, splits, num_samples):
     """
@@ -289,6 +289,9 @@ class GNNFeedbackPolicy(GNNPolicy):
     # in it. None (the default, and always during training) means nothing is stashed.
     diag_stash = None
 
+    # --clamp-mode none: the last _choose_node's stable log pi, read by _log_prob_of
+    _last_log_p = None
+
     def _on_step(self, current_progress_remaining) -> None:
         """
         Update the exploration rate.
@@ -431,7 +434,7 @@ class GNNFeedbackPolicy(GNNPolicy):
             select_random = th.zeros_like(selected_values,device=self.device)
         
 
-        tot_log_prob = th.log(segmented_gather(pa1, selected_actions, data_starts))
+        tot_log_prob = self._log_prob_of(pa1, selected_actions, data_starts)
 
         # # convert the actions to tuples
         # a1 = a1.cpu().numpy()
@@ -452,13 +455,22 @@ class GNNFeedbackPolicy(GNNPolicy):
 
         mask, data_splits, data_starts = make_mask(batch)
 
-        p_a1 = masked_segmented_softmax(x_a1, mask, batch.batch, self.clamp_mode)  
+        if self.clamp_mode == "none":
+            # unbounded logits: log pi from the stable log-softmax, pi = exp(log pi), so a pi that
+            # underflows to 0 has a finite log pi (see masked_segmented_log_softmax)
+            log_p_a1 = masked_segmented_log_softmax(x_a1, mask, batch.batch)
+            p_a1 = log_p_a1.exp()
+        else:
+            p_a1 = masked_segmented_softmax(x_a1, mask, batch.batch, self.clamp_mode)  
+            log_p_a1 = None
+        # read by _log_prob_of (the chosen nodes' log pi) later in this same forward
+        self._last_log_p = log_p_a1
       
         a1 = segmented_sample(p_a1, data_splits,self.num_planning_choices) 
       
         n = a1.shape[1]
         masked_probs = p_a1[mask.bool()]
-        log_probs = th.log(masked_probs)
+        log_probs = th.log(masked_probs) if log_p_a1 is None else log_p_a1[mask.bool()]
         entropy = (-masked_probs*log_probs).sum()/n
 
         if self.diag_stash is not None:
@@ -470,6 +482,15 @@ class GNNFeedbackPolicy(GNNPolicy):
             )
 
         return a1,p_a1,data_starts,entropy
+
+    def _log_prob_of(self, p, actions, data_starts):
+        """log pi of the chosen nodes (one per graph), from _choose_node's output p in the same
+        forward. --clamp-mode none: gathered from the stable log-softmax, since without a clamp
+        a probability can underflow to 0; every other mode: log of the gathered p, exactly as
+        before F3 (the gap between logits is at most 60 there, so p > 0)."""
+        if self.clamp_mode == "none":
+            return segmented_gather(self._last_log_p, actions, data_starts)
+        return th.log(segmented_gather(p, actions, data_starts))
 
     def _choose_global(self, action_net, batch: Batch, latent_sde: Optional[th.Tensor] = None) -> Distribution:
         """
@@ -507,6 +528,8 @@ class GNNFeedbackPolicy(GNNPolicy):
         :param latent_sde: Latent code for the gSDE exploration function
         :return: Action distribution
         """
+        if self.clamp_mode == "none":
+            raise NotImplementedError("--clamp-mode none is not implemented for hybrid (direction) actions")
         a1,pa1,data_starts,entropy = self._choose_node(self.action_net, batch)
 
         mask, data_splits, data_starts = make_mask(batch)

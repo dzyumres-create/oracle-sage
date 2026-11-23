@@ -293,7 +293,7 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
             selected_plans = None
         
 
-        tot_log_prob = th.log(segmented_gather(pa, th.remainder(selected_actions,1000), data_starts))
+        tot_log_prob = self._log_prob_of(pa, th.remainder(selected_actions,1000), data_starts)
 
         # # convert the actions to tuples
         # a1 = a1.cpu().numpy()

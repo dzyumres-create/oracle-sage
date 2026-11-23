@@ -52,6 +52,7 @@ from sage.domains.gym_taxi.envs.taxi_env import (
 TAXI_NODE = 0
 LOGIT_CLAMP = 30.0  # masked_segmented_softmax's clamp
 RELATIVE_CLAMP_WINDOW = 2 * LOGIT_CLAMP  # graph_policy.RELATIVE_CLAMP_WINDOW (--clamp-mode relative)
+SOFT_CLAMP_SCALE = LOGIT_CLAMP  # graph_policy.SOFT_CLAMP_SCALE (--clamp-mode soft)
 
 NODE_TYPES = ("taxi", "location", "waiting_passenger", "carried_passenger")
 # delivered / fail_*: the plan's dropoff (always its last action) and what it did; fail_empty is a
@@ -127,12 +128,17 @@ def node_type(node, n_locations, carried):
 
 def clamp_logits(logits, mask, clamp_mode="absolute"):
     """float64 logits after masked_segmented_softmax's clamp for this graph: absolute clips to
-    [-30, 30]; relative subtracts the max over valid nodes and clips to [-60, 0]."""
+    [-30, 30]; relative subtracts the max over valid nodes and clips to [-60, 0]; none leaves
+    them as they are; soft is 30 * tanh(x / 30)."""
     z = logits.astype(np.float64)
     if clamp_mode == "absolute":
         return np.clip(z, -LOGIT_CLAMP, LOGIT_CLAMP)
     if clamp_mode == "relative":
         return np.clip(z - z[mask].max(), -RELATIVE_CLAMP_WINDOW, 0.0)
+    if clamp_mode == "none":
+        return z
+    if clamp_mode == "soft":
+        return SOFT_CLAMP_SCALE * np.tanh(z / SOFT_CLAMP_SCALE)
     raise ValueError(f"unknown clamp_mode {clamp_mode!r}")
 
 

@@ -281,11 +281,14 @@ def main(arglist):
     )
     parser.add_argument(
         "--clamp-mode",
-        choices=["absolute", "relative"],
+        choices=["absolute", "relative", "none", "soft"],
         default="absolute",
         help="how the action logits are bounded before the softmax: absolute (default, the original "
-             "clamp to [-30, 30]) or relative (minus each graph's max valid logit, clamped to [-60, 0]; "
-             "the same policy wherever every valid logit is within [-30, 30]). Requires --feedback.",
+             "clamp to [-30, 30]); relative (minus each graph's max valid logit, clamped to [-60, 0]); "
+             "none (no bound; log-probs from a stable log-softmax); soft (30*tanh(x/30): bounded, "
+             "gradient never exactly 0). absolute, relative and none give the same policy wherever every "
+             "valid logit is within [-30, 30]; soft is close to them only for small logits (|x| up to ~5). "
+             "Requires --feedback.",
     )
     parser.add_argument(
         "--allow-dirty",
