@@ -570,6 +570,8 @@ class TestGnnGlobalWiring(unittest.TestCase):
         real_make_vec_env = gnn_global.make_vec_env
 
         def make_vec_env_from_spec(env_id, **kwargs):
+            if not isinstance(env_id, str):  # gym >= 0.26: gnn_global already passes compat's constructor
+                return real_make_vec_env(env_id, **kwargs)
             env_kwargs = kwargs.pop("env_kwargs", {}) or {}
             return real_make_vec_env(lambda: GraphTaxiEnv(**spec_kwargs(gym_module.spec(env_id)), **env_kwargs), **kwargs)
 

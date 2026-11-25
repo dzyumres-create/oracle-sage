@@ -401,7 +401,11 @@ class TestRunNaming(unittest.TestCase):
                 with self.assertRaises(Stop):
                     gnn_global.run(variant)
             self.assertEqual(captured["env_kwargs"], {"oracle_decoder": True} if flag else {})
-            env = GraphTaxiEnv(**spec_kwargs(gym_module.spec(captured["env_id"])), **captured["env_kwargs"])
+            # gym 0.18: the env id (make_vec_env calls gym.make); gym >= 0.26: compat's constructor
+            if isinstance(captured["env_id"], str):
+                env = GraphTaxiEnv(**spec_kwargs(gym_module.spec(captured["env_id"])), **captured["env_kwargs"])
+            else:
+                env = captured["env_id"](**captured["env_kwargs"])
             self.assertIs(env.observation_space.planner.oracle, flag)
             env.close()
 

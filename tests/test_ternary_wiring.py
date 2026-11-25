@@ -446,8 +446,9 @@ class TestPlannerNowWired(unittest.TestCase):
 #     before/after this commit.
 #
 #     References are keyed by library stack, because the hash is only meaningful within
-#     one: env.seed() gives a numpy Generator under gym 0.26 but a RandomState under
-#     gym 0.18, so the same seed yields different mazes and passengers. Compute an entry
+#     one: before the gym-0.26 compat commit, env.seed() gave a numpy Generator under
+#     gym 0.26 but a RandomState under gym 0.18, so the same seed yielded different mazes
+#     and passengers. Now both stacks seed like gym 0.18 (see the gym0.26 note below). Compute an entry
 #     with analysis/old_domain_obs_hash.py (same seed, actions and hashing as this test),
 #     run against commit ebbf25b on the stack in question.
 #
@@ -456,7 +457,11 @@ class TestPlannerNowWired(unittest.TestCase):
 #     fields, so the cell5-based a628f16 values no longer apply there; atom's value is
 #     unchanged). A stack with no entry FAILS (never skips) with the command to run.
 #
-#     gym0.26: Mac (gym 0.26.2), analysis/old_domain_obs_hash.py run against ebbf25b.
+#     gym0.26: Mac (gym 0.26.2), analysis/old_domain_obs_hash.py run against ebbf25b through
+#              analysis/with_gym018_seeding.py: since the gym-0.26 compat commit the envs seed
+#              like gym 0.18 (compat.np_random), so atom's value equals RCP's gym0.18 one.
+#              oracle_sage/vilg differ from gym0.18 in the observation string only (same
+#              episodes; their WL fields come out differently on this stack).
 #     gym0.18: not yet recorded -- run OLD_DOMAIN_REFERENCE_COMMAND on RCP.
 # ==========================================================================================
 
@@ -475,9 +480,9 @@ OLD_DOMAIN_REFERENCE_COMMAND = (
 
 OLD_DOMAIN_REFERENCE_SHA256 = {
     "gym0.26": {
-        "oracle_sage": "a1f954d3b08ac6d2fab00727578baa1a33c974b7d28e3b19cdc869e9d85df773",
-        "vilg": "6d13a91ad902e72d872e8c182e836d9d4c52d0d79e08377608eab605ed781e4a",
-        "atom": "443aba261710f3dc090cd55617c1f0f019a4ec4a3ce3d04dc3cf5f358e346ecc",
+        "oracle_sage": "42d915d287350ee57f51738f4a95738ccdf1e96e5e40b93afa8a91ed54771f35",
+        "vilg": "e0711cbd010408f9ce63e1f24e25c8b3b1de8579401c98025f4d5b24bbd0d2ba",
+        "atom": "59ba07766f6bf0538f5952724e6d0ddcb5ed81849c9c8f95d4c900aad96be504",
     },
     "gym0.18": {
         "oracle_sage": "ac44fdcc8fa9095931a3bb03143651834363705fb019d0f98014588218f6ae88",

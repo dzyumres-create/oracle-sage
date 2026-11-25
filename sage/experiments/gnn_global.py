@@ -28,7 +28,7 @@ from sage.agent.checkpoint_callback import PeriodicCheckpointCallback
 from sage.agent.async_vec_env import AsyncVecEnv
 from sage.domains.gym_taxi.utils.wl_vocab_cache import configure_wl_vocab_override, get_wl_vocab, reset_wl_vocab_override
 from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_DIAGNOSTIC_KEYS
-from sage.domains.gym_taxi.utils.compat import spec_kwargs
+from sage.domains.gym_taxi.utils.compat import compat_label, spec_kwargs, vec_env_id
 
 ORACLE_DECODER_SUFFIX = "_oracle_decoder"
 DIAG_OUT_DIR = os.path.join("chart_logs", "diag")
@@ -64,7 +64,8 @@ def dirty_label(entries):
 def startup_line(arglist):
     """Logging only: the run's full command line and code version, printed before anything else."""
     commit, entries = git_provenance()
-    return f"startup: argv={sys.argv!r} main_args={list(arglist)!r} commit={commit} dirty={dirty_label(entries)}"
+    return (f"startup: argv={sys.argv!r} main_args={list(arglist)!r} commit={commit} dirty={dirty_label(entries)} "
+            f"{compat_label()}")
 
 def require_clean_tree(allow_dirty):
     """Provenance guard, called by run() before anything is built: a run must come from a
@@ -223,9 +224,9 @@ def run(variant):
         env_kwargs["diag_occupancy"] = True
 
     if variant["planner"]:
-        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv,env_kwargs=env_kwargs)
+        env = make_vec_env(vec_env_id(variant['env_name']), n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},vec_env_cls=AsyncVecEnv,env_kwargs=env_kwargs)
     else:
-        env = make_vec_env(variant['env_name'], n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},env_kwargs=env_kwargs)
+        env = make_vec_env(vec_env_id(variant['env_name']), n_envs=variant["num_processes"], seed=variant["seed"],monitor_kwargs={"info_keywords":info_keywords},env_kwargs=env_kwargs)
 
     if variant["feedback"]:
         if variant["planner"]:

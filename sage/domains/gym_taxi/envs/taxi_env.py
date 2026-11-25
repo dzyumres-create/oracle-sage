@@ -21,6 +21,7 @@ from sage.domains.gym_taxi.simulator.ternary_taxi_world import DROPOFF_EMPTY, Te
 from sage.domains.gym_taxi.simulator.planner import Planner
 from sage.domains.utils.spaces import JsonGraph
 from sage.domains.gym_taxi.utils.spaces import Json
+from sage.domains.gym_taxi.utils import compat
 from sage.domains.utils.representations import (
     json_to_graph,
 )
@@ -249,7 +250,9 @@ class BaseTaxiEnv(gym.Env):
         return
 
     def seed(self, seed=None):
-        self.np_random, seed = seeding.np_random(seed)
+        # gym's own seeding.np_random on gym < 0.26 (RCP: unchanged); gym 0.18's algorithm on
+        # gym >= 0.26, so a seed gives RCP's episodes on the Macs too (see compat.np_random)
+        self.np_random, seed = compat.np_random(seed)
         return [seed]
 
 

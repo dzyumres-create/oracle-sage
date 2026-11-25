@@ -88,7 +88,10 @@ def num(value):
 
 def make_vec_env_from_spec(env_id, **kwargs):
     """gym.make on gym 0.26 rejects JsonGraph, so build the same registered env from its spec
-    (as tests/test_chunked_update.py's TestGnnGlobalWiring does)."""
+    (as tests/test_chunked_update.py's TestGnnGlobalWiring does). On gym >= 0.26 gnn_global
+    already passes compat's constructor instead of the id, which is used as it is."""
+    if not isinstance(env_id, str):
+        return make_vec_env(env_id, **kwargs)
     env_kwargs = kwargs.pop("env_kwargs", {}) or {}
     return make_vec_env(lambda: GraphTaxiEnv(**spec_kwargs(gym_module.spec(env_id)), **env_kwargs), **kwargs)
 

@@ -494,16 +494,18 @@ class TestLoggedKeysSurviveTruncation(unittest.TestCase):
 # oracle_sage/vilg form includes WL fields, so the cell5-based values no longer apply
 # (Monitor CSVs and atom's info hash are unchanged). A stack with no entry FAILS (never
 # skips), with the command that generates it.
-#   gym0.26: Mac (gym 0.26.2), analysis/old_domain_info_hash.py run against ebbf25b.
+#   gym0.26: Mac (gym 0.26.2), analysis/old_domain_info_hash.py run against ebbf25b through
+#            analysis/with_gym018_seeding.py (the envs seed like gym 0.18 since the gym-0.26
+#            compat commit); atom's info hash equals RCP's gym0.18 one.
 #   gym0.18: not yet recorded -- run OLD_DOMAIN_REFERENCE_COMMAND on RCP.
 OLD_DOMAIN_INFO_REFERENCE_SHA256 = {
     "gym0.26": {
         "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                        "f64be900fbbd1804374ea37bfd5f797c97ebc8c0201aa71363e29f8fe516470a"),
+                        "42d54bdb93f83bc441fd5522d7f49076fc7da98dcdc71fe6cec462162a13c766"),
         "vilg": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                 "893b65912a17a094026c387c75d942ad3598a43fb156125d1a17d27e1403fcc7"),
+                 "565c0500c2129948b66505d141717470f302822c9be0785c26e07922b4176129"),
         "atom": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
-                 "2b27206df4a5a0985c185fd82e709ccdd5e1f2cbf2592d093823329941d5c570"),
+                 "121d53778c32495842f6dd3f198fc6615405e03486b429b6456649b849efae1c"),
     },
     "gym0.18": {
         "oracle_sage": ("9a3157f2768359c71817a3a9bdf4971f8b1f07682709c64d38ccd4cba560fbbc",
