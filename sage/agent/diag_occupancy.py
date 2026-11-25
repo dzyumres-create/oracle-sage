@@ -70,6 +70,9 @@ DECISION_COLUMNS_BASE = (
     "outcome", "plan_reward", "advantage", "pg_proxy",
     "rollout_step", "episode_idx", "taxi_loc", "p_cand_max", "executed_rank", "p_carried", "logp_stored",
     "steps_run", "dropoff_pid", "pickup_failed",
+    # --candidate-floor: how many of this decision's k candidates the floor replaced by the top
+    # candidate (cand*_ columns show the candidates after replacement); -1 with the floor off
+    "floor_replaced",
 )
 BOOTSTRAP_COLUMNS_BASE = (
     "update_idx", "env_idx", "occupied", "carried_pid", "n_valid",
@@ -99,7 +102,9 @@ TYPE_SHORT = {"taxi": "taxi", "location": "loc", "waiting_passenger": "wait"}
 STDOUT_KEYS = (
     ("occ_frac", "p_top_occ", "p_top_empty", "ent_occ", "ent_empty", "retry_frac_occ",
      "succ_first", "succ_retry", "kl_all", "kl_occ", "kl_empty", "pg_share_occ",
-     "occ_exec_not_carr", "occ_pv_margin", "occ_abs_logp")
+     "occ_exec_not_carr", "occ_pv_margin", "occ_abs_logp",
+     # --candidate-floor only: share of candidate slots replaced, occupied / empty taxi
+     "floor_rep_occ", "floor_rep_emp")
     + tuple(f"{group}_t_{short}" for group in ("occ", "emp") for short in TYPE_SHORT.values())
     + tuple(f"{group}_o_{short}" for group in ("occ", "emp") for short in OUTCOME_SHORT.values())
 )
@@ -240,6 +245,8 @@ class OccupancyDiagnostics(object):
         probs = stash["probs"].cpu().numpy()
         candidates = stash["candidates"].cpu().numpy()  # [k, n]
         path_values = None if stash["path_values"] is None else stash["path_values"].cpu().numpy()  # [n, k]
+        floor_replaced = stash.get("floor_replaced")
+        floor_replaced = None if floor_replaced is None else floor_replaced.cpu().numpy()  # [k, n] bool
         n = candidates.shape[1]
         if self.n_candidates is None:
             self.n_candidates = candidates.shape[0]
@@ -248,9 +255,11 @@ class OccupancyDiagnostics(object):
         views = []
         for g in range(n):
             s, e = starts[g], starts[g] + counts[g]
-            views.append(_GraphView(logits[s:e], mask[s:e], probs[s:e], candidates[:, g],
-                                    None if path_values is None else path_values[g],
-                                    getattr(policy, "clamp_mode", "absolute")))
+            view = _GraphView(logits[s:e], mask[s:e], probs[s:e], candidates[:, g],
+                              None if path_values is None else path_values[g],
+                              getattr(policy, "clamp_mode", "absolute"))
+            view.n_floor_replaced = -1 if floor_replaced is None else int(floor_replaced[:, g].sum())
+            views.append(view)
         return views
 
     def _candidate_columns(self):
@@ -301,6 +310,7 @@ class OccupancyDiagnostics(object):
                 "plan_len": len(plans[i]), "p_cand_max": view.cand_p[0], "executed_rank": view.rank_of(node),
                 "p_carried": view.p_of(state["carried"]) if state["occupied"] else float("nan"),
                 "logp_stored": float(log_probs[i]),
+                "floor_replaced": view.n_floor_replaced,
             }
             row.update(self._candidate_values(view, state))
             self._rows.append(row)
@@ -492,6 +502,10 @@ class OccupancyDiagnostics(object):
                     rec(f"diag/{group}_o_{short}", int(r["outcome"] == o))
                 if r["outcome"] in ATTEMPT_OUTCOMES:
                     rec("diag/succ_retry" if group == "occ" else "diag/succ_first", int(r["outcome"] == "delivered"))
+        for group, rows in (("occ", occ), ("emp", emp)):
+            for r in rows:
+                if r["floor_replaced"] >= 0:
+                    rec(f"diag/floor_rep_{group}", r["floor_replaced"] / self.n_candidates)
         for r in occ:
             rec("diag/retry_frac_occ", r["selected_is_carried"])
             rec("diag/occ_exec_not_carr", int(r["selected_node"] != r["carried_pid"]))

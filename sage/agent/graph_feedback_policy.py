@@ -204,6 +204,7 @@ class GNNFeedbackPolicy(GNNPolicy):
         shared_gnn: bool = False,
         layer_norm: bool = False,
         clamp_mode: str = "absolute",
+        candidate_floor: float = 0.0,
     ):
         # Must be set before super().__init__(): _build_path_value_net()
         # (called from within that chain's _build(), before optimizer
@@ -216,6 +217,11 @@ class GNNFeedbackPolicy(GNNPolicy):
         # how masked_segmented_softmax bounds the action logits (--clamp-mode); used by every
         # _choose_node call, so collection and evaluate_actions share it
         self.clamp_mode = clamp_mode
+        if not 0.0 <= candidate_floor < 1.0:
+            raise ValueError(f"candidate_floor must be in [0, 1), got {candidate_floor!r}")
+        # --candidate-floor: used by GNNPlanFeedbackPolicy._choose_top_action (and so by the WL
+        # policy, which inherits it); 0 (the default) turns it off
+        self.candidate_floor = float(candidate_floor)
         self.num_planning_choices = num_planning_choices
         self.shared_gnn = shared_gnn
 

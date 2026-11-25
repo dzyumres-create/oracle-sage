@@ -37,6 +37,7 @@ from sage.domains.utils.spaces import Autoregressive, BinaryAction
 
 from sage.agent.graph_policy import get_start_indices, masked_segmented_softmax,  segmented_scatter_, segmented_gather, make_mask, NodeExtractor, GNNExtractor, GNNPolicy
 from sage.agent.graph_feedback_policy import GNNFeedbackPolicy, PathValueNet
+import torch_scatter
 
 def segmented_sample(probs, splits, num_samples):
     """
@@ -68,6 +69,29 @@ def project_actions(batch, actions, planner):
     batches = [Batch.from_data_list(projections[i]) for i in range(projections.shape[0])]
     
     return batches, plans
+
+def apply_candidate_floor(a, pa, data_starts, batch_ind, floor):
+    """
+    --candidate-floor: replaces every sampled candidate whose probability is below
+    floor * pi_max (pi_max = the actor's highest probability in that graph) by the graph's top
+    candidate (the highest-pi one of the k drawn). Shapes stay [k, n]; a replaced slot is a
+    duplicate of the top candidate, so if the selector prefers it, it executes the top node.
+    The top candidate itself is never replaced. Draws no random numbers.
+
+    :param a: [k, n] sampled node ids (local to each graph)
+    :param pa: flat pi over every node of the batch (0 on invalid nodes)
+    :param data_starts: first node index of each graph
+    :param batch_ind: graph index of every node
+    :param floor: F in (0, 1)
+    :return: (new [k, n] candidates, [k, n] bool: which slots were replaced)
+    """
+    cand_p = segmented_gather(pa, th.remainder(a, 1000), data_starts)  # [k, n]
+    p_max, _ = torch_scatter.scatter_max(pa.detach(), batch_ind, dim=0)  # [n]
+    top_slot = cand_p.argmax(0)  # [n]
+    top = a.gather(0, top_slot.unsqueeze(0)).expand_as(a)
+    replaced = cand_p < floor * p_max.unsqueeze(0)
+    replaced[top_slot, th.arange(a.shape[1], device=a.device)] = False
+    return th.where(replaced, top, a), replaced
 
 def select_action(actions, projected_values, plans):
     """
@@ -224,6 +248,11 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
 
         if eval_action is None:
 
+            floor_replaced = None
+            if self.candidate_floor > 0:
+                a, floor_replaced = apply_candidate_floor(a, pa, data_starts, batch.batch, self.candidate_floor)
+                # share of the k*n candidate slots the floor replaced in this forward
+                logger.record_mean("action_selection/floor_replaced", floor_replaced.float().mean().item())
 
             projected_values = []
             projected_batches, plans = project_actions(symbolic_batch, a,self.observation_space.planner)
@@ -279,7 +308,8 @@ class GNNPlanFeedbackPolicy(GNNFeedbackPolicy):
 
             if self.diag_stash is not None:
                 self.diag_stash.update(
-                    candidates=a.detach().clone(),  # [k, n_graphs] node ids th.multinomial drew
+                    candidates=a.detach().clone(),  # [k, n_graphs] node ids th.multinomial drew (after --candidate-floor)
+                    floor_replaced=None if floor_replaced is None else floor_replaced.detach().clone(),  # [k, n_graphs]
                     path_values=None if self.num_planning_choices == 1 else projected_values.detach().clone(),  # [n_graphs, k]
                 )
 

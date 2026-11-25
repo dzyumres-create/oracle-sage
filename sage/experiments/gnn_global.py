@@ -117,9 +117,22 @@ def validate_diag_occupancy(env_name, feedback, planner):
             f"--feedback {feedback}, --planner {planner}"
         )
 
-def diag_run_name(log_dir, seed):
-    """<run> in chart_logs/diag/<run>_*.csv: the log directory's name plus the seed."""
-    return f"{os.path.basename(os.path.normpath(log_dir))}_s{seed}"
+def diag_run_name(log_dir, seed, candidate_floor=0.0):
+    """<run> in chart_logs/diag/<run>_*.csv: the log directory's name plus the seed, plus
+    _floor<F> when --candidate-floor is on (so a floor run never shares a name with a run
+    without it)."""
+    name = f"{os.path.basename(os.path.normpath(log_dir))}_s{seed}"
+    if candidate_floor > 0:
+        name += f"_floor{candidate_floor:g}"
+    return name
+
+def validate_candidate_floor(candidate_floor, feedback, planner):
+    """--candidate-floor acts on the k sampled candidates of the --planner --feedback selector."""
+    if not 0.0 <= candidate_floor < 1.0:
+        raise ValueError(f"--candidate-floor must be in [0, 1), got {candidate_floor}")
+    if candidate_floor > 0 and not (feedback and planner):
+        raise ValueError(f"--candidate-floor requires --feedback and --planner; got --feedback {feedback}, "
+                         f"--planner {planner}")
 
 def oracle_decoder_dir(path):
     """save_dir/log_dir for an --oracle-decoder run: the given path with a fixed suffix,
@@ -289,6 +302,15 @@ def main(arglist):
              "gradient never exactly 0). absolute, relative and none give the same policy wherever every "
              "valid logit is within [-30, 30]; soft is close to them only for small logits (|x| up to ~5). "
              "Requires --feedback.",
+    )
+    parser.add_argument(
+        "--candidate-floor",
+        type=float,
+        default=0.0,
+        help="after the k planning candidates are sampled, replace every candidate whose probability "
+             "is below F times the graph's highest probability by the top candidate, so the selector "
+             "can only execute it or a candidate above the floor (default: 0, off). log pi is still that "
+             "of the executed node. Logged as action_selection/floor_replaced. Requires --feedback --planner.",
     )
     parser.add_argument(
         "--allow-dirty",
@@ -509,6 +531,7 @@ def main(arglist):
                          "GNNPlanFeedbackPolicy); pass --feedback")
     if args.diag_occupancy:
         validate_diag_occupancy(args.env_name, args.feedback, args.planner)
+    validate_candidate_floor(args.candidate_floor, args.feedback, args.planner)
     if args.oracle_decoder:
         validate_oracle_decoder(args.env_name, args.graph_convention)
         args.save_dir = oracle_decoder_dir(args.save_dir)
@@ -580,9 +603,12 @@ def main(arglist):
     # zip's policy_kwargs records "relative" whenever it was used)
     if args.clamp_mode != "absolute":
         variant["algorithm_kwargs"]["policy_kwargs"]["clamp_mode"] = args.clamp_mode
+    # likewise only when on: a default run's model and zip are unchanged
+    if args.candidate_floor > 0:
+        variant["algorithm_kwargs"]["policy_kwargs"]["candidate_floor"] = args.candidate_floor
     if args.diag_occupancy:
         variant["algorithm_kwargs"]["diag_occupancy"] = {
-            "out_dir": DIAG_OUT_DIR, "run_name": diag_run_name(args.log_dir, args.seed),
+            "out_dir": DIAG_OUT_DIR, "run_name": diag_run_name(args.log_dir, args.seed, args.candidate_floor),
             "loss_grad_every": DIAG_LOSS_GRAD_EVERY,
         }
     # optionally set the GPU (default=False)
